@@ -397,6 +397,8 @@ nav:
     - winnet:
       - api/winnet/index.md
       - api/winnet/account-policy.md
+      - api/winnet/connection.md
+      - api/winnet/connection-info.md
       - api/winnet/group.md
       - api/winnet/group-info.md
       - api/winnet/join-status.md

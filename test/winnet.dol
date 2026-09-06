@@ -37,12 +37,6 @@ let expires = DateTime.from_unix
   nanos: (now_nanos - now_nanos % 1000000000 + 365 * 86400 * 1000000000)
 let account_policy_resource = strand.Resource 1
 
-def delete_if_present name
-  try
-    winnet.user(name).delete()
-  catch NotFoundError: _
-    nil
-
 #[fixture]
 def scratch_user block ...rest
   if (sys.os_info().family != :WINDOWS:)
@@ -55,8 +49,7 @@ def scratch_user block ...rest
   let name = "do-test-$(rand.string 10)"
   let password = "Do!$(rand.string 16)9"
   let user = try
-    winnet.create_user
-      name: $name
+    winnet.create_user $name
       password: $password
       full_name: "Do winnet test"
       comment: "created by test/winnet.dol"
@@ -75,7 +68,7 @@ def scratch_user block ...rest
   try
     block user: $user ...rest
   finally
-    delete_if_present $name
+    user.delete()
 
 #[test]
 #[vfs]
@@ -95,17 +88,25 @@ def unsupported_without_windows_backend()
   assert_throws $UnsupportedError do
     winnet.share r"C$"
   assert_throws $UnsupportedError do
+    [...winnet.connections()]
+  assert_throws $UnsupportedError do
+    winnet.connection "Z:"
+  assert_throws $UnsupportedError do
+    winnet.connect r"\\srv\share"
+  assert_throws $UnsupportedError do
+    winnet.universal_name (Path r"Z:\build")
+  assert_throws $UnsupportedError do
     winnet.join_status()
   assert_throws $UnsupportedError do
     winnet.machine_info()
   assert_throws $UnsupportedError do
-    winnet.join_domain domain: corp.example.com
+    winnet.join_domain corp.example.com
   assert_throws $UnsupportedError do
     winnet.unjoin_domain()
   assert_throws $UnsupportedError do
     winnet.rename_machine WS01
   assert_throws $UnsupportedError do
-    winnet.provision_computer domain: corp.example.com machine: WS01
+    winnet.provision_computer corp.example.com machine: WS01
   assert_throws $UnsupportedError do
     winnet.apply_offline_join b"\x01\x02" windows_path: (Path r"C:\Windows")
 
@@ -115,9 +116,9 @@ def unsupported_without_windows_backend()
 #[vfs]
 def join_credentials_are_validated()
   assert_throws $ValueError do
-    winnet.join_domain domain: corp.example.com account: r"CORP\joiner"
+    winnet.join_domain corp.example.com account: r"CORP\joiner"
   assert_throws $ValueError do
-    winnet.join_domain domain: corp.example.com password: secret
+    winnet.join_domain corp.example.com password: secret
   assert_throws $ValueError do
     winnet.unjoin_domain account: r"CORP\joiner"
   assert_throws $ValueError do
@@ -126,8 +127,7 @@ def join_credentials_are_validated()
   # NETSETUP_MACHINE_PWD_PASSED requires a null account, so the two credential
   # forms cannot be combined.
   assert_throws $ValueError do
-    winnet.join_domain
-      domain: corp.example.com
+    winnet.join_domain corp.example.com
       account: r"CORP\joiner"
       password: secret
       machine_password: other
@@ -198,8 +198,7 @@ def domain_join_lifecycle :domain :account :password
   if (before.kind == :DOMAIN:)
     skip "machine is already domain-joined; unjoin it first"
   try
-    winnet.join_domain
-      domain: $domain
+    winnet.join_domain $domain
       account: $account
       password: $password
       create_account: true
@@ -221,7 +220,7 @@ def offline_join_provisioning :domain ..._credentials
   # credentials do not apply here.
   let machine = "DO-$(rand.string(8).upper())"
   let blob = try
-    winnet.provision_computer domain: $domain machine: $machine
+    winnet.provision_computer $domain machine: $machine
   catch PermissionDeniedError: _
     skip "requires permission to create computer accounts"
   assert_type $Bin $blob
@@ -235,28 +234,116 @@ def scratch_share block ...rest
     skip "Wine does not implement a credible SMB server service"
   with_temp_dir do |dir|
     let name = "do-share-$(rand.string 8)"
-    let descriptor = SecDesc b"\x01\x00\x04\x80\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
     let share = try
-      winnet.create_share
-        name: $name
+      winnet.create_share $name
         path: $dir
         comment: "created by test/winnet.dol"
         max_uses: 3
-        sec_desc: $descriptor
+        sec_desc:
+          dacl:
+            - allow: :EVERYONE:
+              mask: :GENERIC_ALL:
     catch PermissionDeniedError: _
       skip "requires permission to manage local shares"
     try
-      block share: $share path: $dir ...rest
+      block share: $share ...rest
     finally
-      try
-        share.delete()
-      catch _
-        nil
+      share.delete()
+
+#[fixture]
+def scratch_connection block :share ...rest
+  # Connecting to a share this machine publishes is a real SMB client
+  # connection and needs no second machine.
+  let connection = try
+    winnet.connect \\localhost\$share.name
+  catch PermissionDeniedError: _
+    skip "requires permission to connect to local shares"
+  try
+    block connection: $connection :share ...rest
+  finally
+    connection.disconnect()
 
 #[test]
 #[vfs]
 #[scratch_share]
-def local_share_lifecycle :share :path
+#[scratch_connection]
+def smb_connection_lifecycle :connection :share
+  let initial = connection.info()
+  assert_type $winnet.Connection $connection
+  assert_type $winnet.ConnectionInfo $initial
+  assert_eq $initial.remote \\localhost\$share.name
+  assert_eq $initial.local nil
+  assert_eq $initial.state :CONNECTED:
+  assert_eq $initial.persistent false
+  assert_type $Bool $connection.connected
+
+  # A deviceless connection is addressed by its remote name.
+  assert_eq $connection.name $initial.remote
+  assert_eq $winnet.connection(initial.remote).info().remote $initial.remote
+  assert_eq $winnet.connection(initial).info().remote $initial.remote
+  assert $winnet.connections().any(do |entry| entry.remote == initial.remote)
+
+#[test]
+#[vfs]
+#[scratch_share]
+def smb_connection_disconnect :share
+  # Connects on its own behalf rather than disconnecting the fixture's.
+  let connection = try
+    winnet.connect \\localhost\$share.name
+  catch PermissionDeniedError: _
+    skip "requires permission to connect to local shares"
+  try
+    connection.disconnect()
+    assert_eq $connection.connected false
+    # Disconnecting twice is a no-op, which is what lets a scoped connection be
+    # disconnected early inside its own block.
+    connection.disconnect()
+    assert_throws $NotFoundError do
+      winnet.connection \\localhost\$share.name
+  finally
+    connection.disconnect()
+
+#[test]
+#[vfs]
+#[scratch_share]
+def smb_connection_scope :share
+  # The block's value is the result of the scoped form.
+  let seen = try
+    winnet.connect \\localhost\$share.name do |conn|
+      assert_eq $conn.info().remote \\localhost\$share.name
+      conn.name
+  catch PermissionDeniedError: _
+    skip "requires permission to connect to local shares"
+  assert_eq $seen \\localhost\$share.name
+  assert_throws $NotFoundError do
+    winnet.connection \\localhost\$share.name
+
+  # A throw from the block still disconnects.
+  assert_throws $ValueError do
+    winnet.connect \\localhost\$share.name do |_conn|
+      throw ValueError "from the block"
+  assert_throws $NotFoundError do
+    winnet.connection \\localhost\$share.name
+
+  # An explicit disconnect inside the block leaves nothing for scope exit.
+  winnet.connect \\localhost\$share.name do |conn|
+    conn.disconnect()
+  assert_throws $NotFoundError do
+    winnet.connection \\localhost\$share.name
+
+#[test]
+#[vfs]
+#[scratch_share]
+def smb_connection_persistence_requires_device :share
+  # Windows only remembers connections that redirect a device, so this is
+  # rejected rather than silently producing a mapping that vanishes at logon.
+  assert_throws $ValueError do
+    winnet.connect \\localhost\$share.name persistent: true
+
+#[test]
+#[vfs]
+#[scratch_share]
+def local_share_lifecycle :share
   let initial = share.info()
   let name = initial.name
   assert_type $winnet.Share $share
@@ -268,7 +355,6 @@ def local_share_lifecycle :share :path
   assert_eq $initial.comment "created by test/winnet.dol"
   assert_eq $initial.max_uses 3
   assert_type $Int $initial.current_uses
-  assert_eq $initial.path $path
   assert_type $SecDesc $initial.sec_desc
   assert_eq $share.name $name
   assert_eq $winnet.share(name).info().name $name
@@ -281,9 +367,26 @@ def local_share_lifecycle :share :path
   assert_eq $updated.comment nil
   assert_eq $updated.max_uses nil
   assert_type $SecDesc $updated.sec_desc
-  share.delete()
-  assert_throws $NotFoundError do
-    winnet.share $name
+
+#[test]
+#[vfs]
+def local_share_delete()
+  # Creates the share it deletes. A fixture's share belongs to the fixture, and
+  # a failure to delete that one has to fail the test rather than be tolerated.
+  if (sys.os_info().family != :WINDOWS:)
+    skip "requires Windows SMB server management"
+  if sys.os_info().is_wine
+    skip "Wine does not implement a credible SMB server service"
+  with_temp_dir do |dir|
+    let name = "do-share-$(rand.string 8)"
+    let share = try
+      winnet.create_share $name path: $dir
+    catch PermissionDeniedError: _
+      skip "requires permission to manage local shares"
+    assert_eq $share.info().path $dir
+    share.delete()
+    assert_throws $NotFoundError do
+      winnet.share $name
 
 #[test]
 #[vfs]
@@ -372,8 +475,7 @@ def local_user_lifecycle :user
 
   # Earlier attributes remain applied when the final rename conflicts.
   let conflict_name = "do-hit-$(rand.string 10)"
-  let conflict = winnet.create_user
-    name: $conflict_name
+  let conflict = winnet.create_user $conflict_name
     password: "Do!$(rand.string 16)7"
   try
     assert_throws $AlreadyExistsError do
@@ -394,9 +496,22 @@ def local_user_lifecycle :user
   let renamed_lookup = winnet.user $renamed
   assert_eq (str renamed_lookup.sid) (str user.sid)
 
+#[test]
+#[vfs]
+def local_user_delete()
+  # Creates the account it deletes, for the same reason as `local_share_delete`.
+  if (sys.os_info().family != :WINDOWS:)
+    skip "requires Windows NetAPI"
+  if sys.os_info().is_wine
+    skip "Wine does not implement NetUserGetInfo level 4 or NetUserSetInfo"
+  let name = "do-test-$(rand.string 10)"
+  let user = try
+    winnet.create_user $name password: "Do!$(rand.string 16)9"
+  catch PermissionDeniedError: _
+    skip "requires permission to manage local users"
   user.delete()
   assert_throws $NotFoundError do
-    winnet.user $renamed
+    winnet.user $name
 
 #[test]
 #[vfs]
@@ -466,10 +581,7 @@ def scratch_group block ...rest
   try
     block group: $group ...rest
   finally
-    try
-      group.delete()
-    catch _
-      nil
+    group.delete()
 
 #[test]
 #[vfs]

@@ -22,7 +22,7 @@ fn make_info<'v>(
     info: machine::Info,
     out: impl Output<'v>,
 ) {
-    global.machine_info.create_with_annex(
+    global.types.machine_info.create_with_annex(
         strand,
         MachineInfo,
         MachineInfoAnnex { global, info },
@@ -82,10 +82,12 @@ impl<'v> Object<'v> for MachineInfo {
             .get("server_type", |this, strand, out| {
                 let annex = this.annex();
                 let server_type = annex.info.server_type();
-                annex
-                    .global
-                    .server_type
-                    .create_with_annex(strand, ServerType, server_type, out);
+                annex.global.types.server_type.create_with_annex(
+                    strand,
+                    ServerType,
+                    server_type,
+                    out,
+                );
                 Ok(())
             })
             .get("workstation", |this, strand, out| {
@@ -121,8 +123,8 @@ pub(crate) fn configure_module<'v, 'a>(
     global: State<'v, Global<'v>>,
 ) -> ModuleBuilder<'v, 'a> {
     module
-        .value("MachineInfo", global.machine_info)
-        .value("ServerType", global.server_type)
+        .value("MachineInfo", global.types.machine_info)
+        .value("ServerType", global.types.server_type)
         .function("machine_info", async move |strand, args, out| {
             let ([], []) = unpack!(strand, args, 0, 0)?;
             let info = machine::info(&dolang_ext_shell::vfs(strand))
