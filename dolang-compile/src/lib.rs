@@ -4,12 +4,12 @@ pub(crate) mod ast;
 pub(crate) mod cfg;
 pub(crate) mod constant;
 pub mod diag;
+pub(crate) mod doc;
 pub(crate) mod elab;
 pub(crate) mod emit;
 pub(crate) mod flow;
 pub(crate) mod lex;
 pub(crate) mod lower;
-pub(crate) mod origin;
 pub(crate) mod parse;
 pub(crate) mod sig;
 pub mod source;
@@ -20,15 +20,18 @@ use std::{
     error,
     fmt::{self, Display},
     io::{self, Write},
+    marker::PhantomData,
     mem,
+    num::NonZero,
     ops::ControlFlow,
     path::Path,
+    slice,
 };
 
 use crate::{ast::visit, lex::Comment};
 
 use self::{
-    ast::visit::{Node, NodeKind},
+    ast::visit::{Node as AstNode, NodeKind},
     elab::Elaborater,
     emit::Emitter,
     lex::Lexer,
@@ -119,40 +122,36 @@ impl From<lower::Error> for Error {
     }
 }
 
-/// Origin of a resolved identifier
-pub use diag::Origin;
+/// Identity of a document node.
+///
+/// Compare and hash these to relate tokens to the declarations they refer to;
+/// the representation is deliberately opaque.  Obtain nodes from
+/// [`Unit::nodes`] and [`Unit::node`].
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub struct NodeId(NonZero<u32>);
 
 /// Token emitter
 pub trait EmitToken {
     /// Emit token
-    fn emit(
-        &mut self,
-        token: Token,
-        span: diag::Span,
-        origin: Option<diag::Origin>,
-        context: Context,
-    );
+    ///
+    /// `node` identifies the declaration the token refers to, if any.  Resolve
+    /// it with [`Unit::node`].
+    fn emit(&mut self, token: Token, span: diag::Span, node: Option<NodeId>, context: Context);
 }
 
 /// Callback function as token emitter
 impl<F> EmitToken for F
 where
-    F: FnMut(Token, diag::Span, Option<diag::Origin>, Context),
+    F: FnMut(Token, diag::Span, Option<NodeId>, Context),
 {
-    fn emit(
-        &mut self,
-        token: Token,
-        span: diag::Span,
-        origin: Option<diag::Origin>,
-        context: Context,
-    ) {
-        self(token, span, origin, context)
+    fn emit(&mut self, token: Token, span: diag::Span, node: Option<NodeId>, context: Context) {
+        self(token, span, node, context)
     }
 }
 
 struct VisitAdapter<'a, 'e> {
     file: &'a File<'a>,
-    origintab: &'a origin::Table,
+    doctab: &'a doc::Table,
     emit: &'e mut dyn EmitToken,
 }
 
@@ -166,7 +165,7 @@ struct CallIdentAdapter<'a, 'b, 'e>(&'b mut VisitAdapter<'a, 'e>);
 impl visit::Visit for CallIdentAdapter<'_, '_, '_> {
     type Break = Infallible;
 
-    fn node<T: Node + ?Sized>(&mut self, node: &T) -> ControlFlow<Self::Break> {
+    fn node<T: AstNode + ?Sized>(&mut self, node: &T) -> ControlFlow<Self::Break> {
         self.0.node(node)
     }
 
@@ -174,10 +173,10 @@ impl visit::Visit for CallIdentAdapter<'_, '_, '_> {
         &mut self,
         _token: Token,
         span: source::Span,
-        origin: Option<origin::Id>,
+        node: Option<doc::Id>,
     ) -> ControlFlow<Self::Break> {
         self.0
-            .emit_token(Token::Variable, span, origin, Context::Call)
+            .emit_token(Token::Variable, span, node, Context::Call)
     }
 }
 
@@ -186,7 +185,7 @@ struct MethodAdapter<'a, 'b, 'e>(&'b mut VisitAdapter<'a, 'e>);
 impl visit::Visit for MethodAdapter<'_, '_, '_> {
     type Break = Infallible;
 
-    fn node<T: Node + ?Sized>(&mut self, node: &T) -> ControlFlow<Self::Break> {
+    fn node<T: AstNode + ?Sized>(&mut self, node: &T) -> ControlFlow<Self::Break> {
         self.0.node(node)
     }
 
@@ -194,20 +193,20 @@ impl visit::Visit for MethodAdapter<'_, '_, '_> {
         &mut self,
         token: Token,
         span: source::Span,
-        origin: Option<origin::Id>,
+        node: Option<doc::Id>,
     ) -> ControlFlow<Self::Break> {
         let context = match token {
             Token::Field => Context::Call,
             _ => Context::None,
         };
-        self.0.emit_token(token, span, origin, context)
+        self.0.emit_token(token, span, node, context)
     }
 }
 
 impl visit::Visit for CallAdapter<'_, '_, '_> {
     type Break = Infallible;
 
-    fn node<T: Node + ?Sized>(&mut self, node: &T) -> ControlFlow<Self::Break> {
+    fn node<T: AstNode + ?Sized>(&mut self, node: &T) -> ControlFlow<Self::Break> {
         if self.seen_arg0 {
             node.accept(self.parent)
         } else {
@@ -228,9 +227,9 @@ impl visit::Visit for CallAdapter<'_, '_, '_> {
         &mut self,
         token: Token,
         span: source::Span,
-        origin: Option<origin::Id>,
+        node: Option<doc::Id>,
     ) -> ControlFlow<Self::Break> {
-        self.parent.emit_token(token, span, origin, Context::None)
+        self.parent.emit_token(token, span, node, Context::None)
     }
 }
 
@@ -242,50 +241,311 @@ fn convert_span(file: &File, span: source::Span) -> diag::Span {
     )
 }
 
-fn convert_origin(file: &File, internal: &origin::Origin) -> Option<diag::Origin> {
-    match internal {
-        origin::Origin::ImportItem { module, item, name } => Some(diag::Origin::ImportItem {
-            module: convert_span(file, *module),
-            item: convert_span(file, *item),
-            name: convert_span(file, *name),
-        }),
-        origin::Origin::ImportModule { module, name } => Some(diag::Origin::ImportModule {
-            module: convert_span(file, *module),
-            name: convert_span(file, *name),
-        }),
-        origin::Origin::PreludeModule { module, name } => Some(diag::Origin::PreludeModule {
-            module: module.clone(),
-            name: name.clone(),
-        }),
-        origin::Origin::PreludeItem { module, item, name } => Some(diag::Origin::PreludeItem {
-            module: module.clone(),
-            item: item.clone(),
-            name: name.clone(),
-        }),
-        origin::Origin::Class { span } => Some(diag::Origin::Class {
-            span: convert_span(file, *span),
-        }),
-        origin::Origin::Def { span } => Some(diag::Origin::Def {
-            span: convert_span(file, *span),
-        }),
-        origin::Origin::Bind { span } => Some(diag::Origin::Bind {
-            span: convert_span(file, *span),
-        }),
-        origin::Origin::Method { span, class } => Some(diag::Origin::Method {
-            span: convert_span(file, *span),
-            class: convert_span(file, *class),
-        }),
-        origin::Origin::Field { span, class } => Some(diag::Origin::Field {
-            span: convert_span(file, *span),
-            class: convert_span(file, *class),
-        }),
-        origin::Origin::Param { span } => Some(diag::Origin::Param {
-            span: convert_span(file, *span),
-        }),
-        origin::Origin::SelfParam { span } => Some(diag::Origin::SelfParam {
-            span: convert_span(file, *span),
-        }),
-        origin::Origin::Synthetic | origin::Origin::Repl => None,
+fn public_node_id(id: doc::Id) -> NodeId {
+    NodeId(id.get())
+}
+
+fn internal_node_id(id: NodeId) -> doc::Id {
+    doc::Id::new(id.0)
+}
+
+/// A document node: a declaration or construct elaboration recorded.
+///
+/// This is a view onto the unit that produced it rather than a copy, so it is
+/// cheap to pass around and its spans are resolved only when asked for.
+#[derive(Copy, Clone)]
+pub struct Node<'a> {
+    file: &'a File<'a>,
+    node: &'a doc::Node,
+}
+
+impl<'a> Node<'a> {
+    /// The node this one is lexically inside, if any.
+    ///
+    /// Parentage is a containment relation: a method's parent is its class, a
+    /// parameter's is its function, a `let`'s is whatever construct encloses it.
+    pub fn parent(&self) -> Option<NodeId> {
+        self.node.parent.map(public_node_id)
+    }
+
+    /// The extent of the whole construct.
+    ///
+    /// Order siblings by this; nothing depends on the order nodes are yielded.
+    pub fn span(&self) -> diag::Span {
+        convert_span(self.file, self.node.span)
+    }
+
+    /// What this node is, with whatever else varies by that.
+    pub fn kind(&self) -> Kind<'a> {
+        let span = |span: &source::Span| convert_span(self.file, *span);
+        match &self.node.kind {
+            doc::Kind::Class {
+                name,
+                is_pub,
+                supers,
+            } => Kind::Class {
+                name: span(name),
+                is_pub: *is_pub,
+                supers: Supers {
+                    file: self.file,
+                    supers: supers.iter(),
+                },
+            },
+            doc::Kind::Function { name, is_pub } => Kind::Function {
+                name: span(name),
+                is_pub: *is_pub,
+            },
+            doc::Kind::Method { name, is_pub } => Kind::Method {
+                name: span(name),
+                is_pub: *is_pub,
+            },
+            doc::Kind::SpecialMethod { name } => Kind::SpecialMethod { name: span(name) },
+            doc::Kind::Field { name, is_pub } => Kind::Field {
+                name: span(name),
+                is_pub: *is_pub,
+            },
+            doc::Kind::Bind { name, is_pub } => Kind::Bind {
+                name: span(name),
+                is_pub: *is_pub,
+            },
+            doc::Kind::Param {
+                name,
+                form,
+                default,
+            } => Kind::Param {
+                name: name.as_ref().map(span),
+                form: match form {
+                    doc::ParamForm::Positional => ParamForm::Positional,
+                    doc::ParamForm::Key { key } => ParamForm::Key { key: span(key) },
+                    doc::ParamForm::Rest => ParamForm::Rest,
+                },
+                default: default.as_ref().map(span),
+            },
+            doc::Kind::SelfParam { name } => Kind::SelfParam { name: span(name) },
+            doc::Kind::ImportModule { module, name } => Kind::ImportModule {
+                module: span(module),
+                name: span(name),
+            },
+            doc::Kind::ImportItem { module, item, name } => Kind::ImportItem {
+                module: span(module),
+                item: span(item),
+                name: span(name),
+            },
+            doc::Kind::PreludeModule { module, name } => Kind::PreludeModule { module, name },
+            doc::Kind::PreludeItem { module, item, name } => {
+                Kind::PreludeItem { module, item, name }
+            }
+            doc::Kind::Lambda => Kind::Lambda,
+            doc::Kind::If => Kind::If,
+            doc::Kind::Else => Kind::Else,
+            doc::Kind::While => Kind::While,
+            doc::Kind::For => Kind::For,
+            doc::Kind::Try => Kind::Try,
+            doc::Kind::Catch => Kind::Catch,
+            doc::Kind::Finally => Kind::Finally,
+            doc::Kind::ForElem => Kind::ForElem,
+            doc::Kind::IfElem => Kind::IfElem,
+            doc::Kind::Decorator { target } => Kind::Decorator {
+                target: target.map(public_node_id),
+            },
+            doc::Kind::Break { target } => Kind::Break {
+                target: target.map(public_node_id),
+            },
+            doc::Kind::Continue { target } => Kind::Continue {
+                target: target.map(public_node_id),
+            },
+            doc::Kind::Return { target } => Kind::Return {
+                target: target.map(public_node_id),
+            },
+            doc::Kind::Synthetic | doc::Kind::Repl => {
+                unreachable!("internal nodes are never surfaced")
+            }
+        }
+    }
+}
+
+/// What a [`Node`] is, together with everything that varies by that.
+///
+/// This is deliberately at the granularity of the language rather than the
+/// parser: `:foo` and `foo: local` parameters are both [`ParamForm::Key`],
+/// for instance, leaving the parser free to re-split them.
+#[non_exhaustive]
+pub enum Kind<'a> {
+    /// A class declaration
+    Class {
+        /// The class name
+        name: diag::Span,
+        /// Declared `pub`
+        is_pub: bool,
+        /// Superclass references, in the order written
+        supers: Supers<'a>,
+    },
+    /// A `def` at statement level
+    Function {
+        /// The function name
+        name: diag::Span,
+        /// Declared `pub`
+        is_pub: bool,
+    },
+    /// A `def` in a class body.  Its class is its parent.
+    Method {
+        /// The method name
+        name: diag::Span,
+        /// Declared `pub`
+        is_pub: bool,
+    },
+    /// A method implementing a protocol.  Its class is its parent.
+    ///
+    /// A special method is part of the type's interface however it was
+    /// declared, so there is no visibility to report.
+    SpecialMethod {
+        /// The protocol name, excluding the parentheses it is written in
+        name: diag::Span,
+    },
+    /// A field declaration in a class body.  Its class is its parent.
+    ///
+    /// A declaration naming several fields yields one node per name.
+    Field {
+        /// The field name
+        name: diag::Span,
+        /// Declared `pub`
+        is_pub: bool,
+    },
+    /// A `let` or other binding
+    Bind {
+        /// The bound name
+        name: diag::Span,
+        /// Declared `pub`
+        is_pub: bool,
+    },
+    /// A parameter.  Its function is its parent.
+    Param {
+        /// The bound name; absent for an anonymous rest parameter
+        name: Option<diag::Span>,
+        /// How the parameter is passed
+        form: ParamForm,
+        /// The default value expression, if any.  Slice the source for its text.
+        default: Option<diag::Span>,
+    },
+    /// The `self` parameter of a method
+    SelfParam {
+        /// The bound name
+        name: diag::Span,
+    },
+    /// `import foo` or `import foo: bar`
+    ImportModule {
+        /// The module path as written
+        module: diag::Span,
+        /// The bound name
+        name: diag::Span,
+    },
+    /// An item imported from a module
+    ImportItem {
+        /// The module path as written
+        module: diag::Span,
+        /// The item name within the module
+        item: diag::Span,
+        /// The bound name
+        name: diag::Span,
+    },
+    /// A module bound by the prelude, which has no source text
+    PreludeModule {
+        /// The module path
+        module: &'a str,
+        /// The bound name
+        name: &'a str,
+    },
+    /// An item bound by the prelude, which has no source text
+    PreludeItem {
+        /// The module path
+        module: &'a str,
+        /// The item name within the module
+        item: &'a str,
+        /// The bound name
+        name: &'a str,
+    },
+    /// A `do` block
+    Lambda,
+    /// An `if` or `else if` body
+    If,
+    /// An `else` body
+    Else,
+    /// A `while` body
+    While,
+    /// A `for` body
+    For,
+    /// A `try` body
+    Try,
+    /// A `catch` handler
+    Catch,
+    /// A `finally` body
+    Finally,
+    /// A comprehension `for`
+    ForElem,
+    /// A comprehension `if`
+    IfElem,
+    /// A decorator.  What it decorates is its parent.
+    Decorator {
+        /// The node the decorator expression names, when it is an identifier
+        target: Option<NodeId>,
+    },
+    /// A `break`
+    Break {
+        /// The loop broken out of
+        target: Option<NodeId>,
+    },
+    /// A `continue`
+    Continue {
+        /// The loop continued
+        target: Option<NodeId>,
+    },
+    /// A `return`
+    Return {
+        /// The function returned from
+        target: Option<NodeId>,
+    },
+}
+
+/// How a parameter is passed
+#[non_exhaustive]
+#[derive(Clone, Debug)]
+pub enum ParamForm {
+    /// Passed by position
+    Positional,
+    /// Passed by name
+    Key {
+        /// The key as written, without the `:` sigil
+        key: diag::Span,
+    },
+    /// Collects the remaining arguments
+    Rest,
+}
+
+/// A superclass reference
+pub struct Super<'a> {
+    /// The reference as written
+    pub span: diag::Span,
+    /// The node it names, when it is an identifier
+    pub target: Option<NodeId>,
+    phantom: PhantomData<&'a ()>,
+}
+
+/// Iterator over a class's superclass references
+#[derive(Clone)]
+pub struct Supers<'a> {
+    file: &'a File<'a>,
+    supers: slice::Iter<'a, doc::Super>,
+}
+
+impl<'a> Iterator for Supers<'a> {
+    type Item = Super<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.supers.next().map(|super_ref| Super {
+            span: convert_span(self.file, super_ref.span),
+            target: super_ref.target.map(public_node_id),
+            phantom: PhantomData,
+        })
     }
 }
 
@@ -294,12 +554,16 @@ impl VisitAdapter<'_, '_> {
         &mut self,
         token: Token,
         span: source::Span,
-        origin: Option<origin::Id>,
+        node: Option<doc::Id>,
         context: Context,
     ) -> ControlFlow<Infallible> {
         let diag_span = convert_span(self.file, span);
-        let diag_origin = origin.and_then(|id| convert_origin(self.file, &self.origintab[id]));
-        self.emit.emit(token, diag_span, diag_origin, context);
+        // Nodes the elaborator invented for its own bookkeeping are not part of
+        // the document, so a token referring to one refers to nothing.
+        let node = node
+            .filter(|id| !self.doctab[*id].kind.is_internal())
+            .map(public_node_id);
+        self.emit.emit(token, diag_span, node, context);
         ControlFlow::Continue(())
     }
 }
@@ -307,7 +571,7 @@ impl VisitAdapter<'_, '_> {
 impl visit::Visit for VisitAdapter<'_, '_> {
     type Break = Infallible;
 
-    fn node<T: Node + ?Sized>(&mut self, node: &T) -> ControlFlow<Self::Break> {
+    fn node<T: AstNode + ?Sized>(&mut self, node: &T) -> ControlFlow<Self::Break> {
         if matches!(node.kind(), NodeKind::Call) {
             node.accept(&mut CallAdapter {
                 parent: self,
@@ -322,9 +586,9 @@ impl visit::Visit for VisitAdapter<'_, '_> {
         &mut self,
         token: Token,
         span: source::Span,
-        origin: Option<origin::Id>,
+        node: Option<doc::Id>,
     ) -> ControlFlow<Self::Break> {
-        self.emit_token(token, span, origin, Context::None)
+        self.emit_token(token, span, node, Context::None)
     }
 }
 
@@ -578,7 +842,7 @@ impl<'a> Config<'a> {
     {
         let mut compiler = Compiler {
             file: File::new(path, content),
-            origintab: Default::default(),
+            doctab: Default::default(),
             symtab: sym::Table::new(),
             bintab: BinTable::new(),
             consttab: constant::Table::new(),
@@ -644,6 +908,43 @@ impl Unit<'_> {
         self.diags.iter().map(|diag| diag.resolve(&self.compiler))
     }
 
+    /// Iterate the document nodes of the unit: its declarations and constructs.
+    ///
+    /// This reads a table the elaborator built and walks no syntax tree, so
+    /// structure can be had without emitting tokens at all.  Each node names its
+    /// parent, so the order nodes are yielded carries no meaning; order siblings
+    /// by [`Node::span`].
+    pub fn nodes(&self) -> impl Iterator<Item = (NodeId, Node<'_>)> {
+        self.compiler
+            .doctab
+            .iter()
+            .filter(|(_, node)| !node.dead && !node.kind.is_internal())
+            .map(|(id, node)| {
+                (
+                    public_node_id(id),
+                    Node {
+                        file: &self.compiler.file,
+                        node,
+                    },
+                )
+            })
+    }
+
+    /// Look up a single document node, as named by a token or by another node.
+    ///
+    /// Returns `None` for an identity this unit did not produce.
+    pub fn node(&self, id: NodeId) -> Option<Node<'_>> {
+        let id = internal_node_id(id);
+        if id.index() >= self.compiler.doctab.len() {
+            return None;
+        }
+        let node = &self.compiler.doctab[id];
+        (!node.dead && !node.kind.is_internal()).then_some(Node {
+            file: &self.compiler.file,
+            node,
+        })
+    }
+
     /// Emit semantic tokens for the unit.
     ///
     /// The precise order of emitted tokens is not specified, but will be approximately in
@@ -654,7 +955,7 @@ impl Unit<'_> {
     pub fn tokens(&self, tokens: &mut impl EmitToken) {
         let ControlFlow::Continue(()) = self.ast.accept(&mut VisitAdapter {
             file: &self.compiler.file,
-            origintab: &self.compiler.origintab,
+            doctab: &self.compiler.doctab,
             emit: tokens,
         });
         for comment in self.comments.iter() {
@@ -707,7 +1008,7 @@ impl Unit<'_> {
 /// Compiler state backing a [`Unit`].
 pub(crate) struct Compiler<'a> {
     file: File<'a>,
-    origintab: origin::Table,
+    doctab: doc::Table,
     symtab: sym::Table,
     bintab: BinTable,
     consttab: constant::Table,
@@ -732,7 +1033,7 @@ impl Compiler<'_> {
             &self.file,
             &mut self.bintab,
             &mut self.symtab,
-            &mut self.origintab,
+            &mut self.doctab,
             diags,
         )
     }
@@ -746,7 +1047,7 @@ impl Compiler<'_> {
             consttab: &mut self.consttab,
             packtab: &mut self.packtab,
             unpacktab: &mut self.unpacktab,
-            origintab: &self.origintab,
+            doctab: &self.doctab,
             prelude: &self.prelude,
             sentinel_const: None,
         }
@@ -770,7 +1071,7 @@ impl Compiler<'_> {
 #[cfg(feature = "debug")]
 impl Compiler<'_> {
     /// Generate a graphviz DOT representation of an AST
-    fn ast_to_dot<N: Node + ?Sized>(&self, ast: &N, writer: &mut impl Write) -> io::Result<()> {
+    fn ast_to_dot<N: AstNode + ?Sized>(&self, ast: &N, writer: &mut impl Write) -> io::Result<()> {
         use crate::ast::{dot::DotVisitor, visit::Visit};
         use dot_writer::DotWriter;
 
@@ -786,7 +1087,7 @@ impl Compiler<'_> {
 
     /// Export AST to a DOT file based on the DOLANG_EXPORT_DOT environment variable
     /// Similar to the CFG export functionality
-    fn export_ast_dot<N: Node + ?Sized>(&self, ast: &N, res: bool) -> io::Result<()> {
+    fn export_ast_dot<N: AstNode + ?Sized>(&self, ast: &N, res: bool) -> io::Result<()> {
         use std::{
             fs,
             path::{self, Component},
@@ -907,5 +1208,406 @@ mod tests {
             unit.emit(&mut out).unwrap_err().kind(),
             ErrorKind::Fail
         ));
+    }
+
+    /// Collect `(kind name, declared name, parent's declared name)` for every
+    /// node, so a test can state the tree without depending on node identities.
+    fn tree(unit: &Unit<'_>) -> Vec<(&'static str, String, Option<String>)> {
+        let named = |id: NodeId| -> Option<String> {
+            let node = unit.node(id)?;
+            Some(node_name(unit, &node.kind()))
+        };
+        let mut rows: Vec<_> = unit
+            .nodes()
+            .map(|(_, node)| {
+                (
+                    kind_name(&node.kind()),
+                    node_name(unit, &node.kind()),
+                    node.parent().and_then(named),
+                )
+            })
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    fn kind_name(kind: &Kind<'_>) -> &'static str {
+        match kind {
+            Kind::Class { .. } => "class",
+            Kind::Function { .. } => "function",
+            Kind::Method { .. } => "method",
+            Kind::SpecialMethod { .. } => "special_method",
+            Kind::Field { .. } => "field",
+            Kind::Bind { .. } => "bind",
+            Kind::Param { .. } => "param",
+            Kind::SelfParam { .. } => "self",
+            Kind::ImportModule { .. } => "import_module",
+            Kind::ImportItem { .. } => "import_item",
+            Kind::PreludeModule { .. } => "prelude_module",
+            Kind::PreludeItem { .. } => "prelude_item",
+            Kind::Lambda => "lambda",
+            Kind::If => "if",
+            Kind::Else => "else",
+            Kind::While => "while",
+            Kind::For => "for",
+            Kind::Try => "try",
+            Kind::Catch => "catch",
+            Kind::Finally => "finally",
+            Kind::ForElem => "for_elem",
+            Kind::IfElem => "if_elem",
+            Kind::Decorator { .. } => "decorator",
+            Kind::Break { .. } => "break",
+            Kind::Continue { .. } => "continue",
+            Kind::Return { .. } => "return",
+        }
+    }
+
+    /// The source text of whatever a node declares, or its kind if it declares
+    /// no name.
+    fn node_name(unit: &Unit<'_>, kind: &Kind<'_>) -> String {
+        let text = |span: &diag::Span| {
+            unit.compiler.file.str(source::Span {
+                start: span.start().byte_offset() as source::Offset,
+                end: span.end().byte_offset() as source::Offset,
+            })
+        };
+        match kind {
+            Kind::Class { name, .. }
+            | Kind::Function { name, .. }
+            | Kind::Method { name, .. }
+            | Kind::Field { name, .. }
+            | Kind::Bind { name, .. }
+            | Kind::SelfParam { name }
+            | Kind::ImportModule { name, .. }
+            | Kind::ImportItem { name, .. } => text(name).to_owned(),
+            // The span names the identifier; the kind is what says it is a
+            // protocol name and so is written in parentheses.
+            Kind::SpecialMethod { name } => format!("({})", text(name)),
+            Kind::Param { name, .. } => name.as_ref().map_or("...", text).to_owned(),
+            Kind::PreludeModule { name, .. } | Kind::PreludeItem { name, .. } => (*name).to_owned(),
+            other => kind_name(other).to_owned(),
+        }
+    }
+
+    /// The reserved zero index keeps optional node identities pointer-free.
+    ///
+    /// Parent links, jump targets and decorator targets are all optional, so an
+    /// `Option<NodeId>` that costs nothing over a `NodeId` is worth the one
+    /// wasted slot at the head of the table.
+    #[test]
+    fn an_optional_node_identity_is_no_wider_than_a_node_identity() {
+        assert_eq!(
+            mem::size_of::<Option<NodeId>>(),
+            mem::size_of::<NodeId>(),
+            "NodeId should be niche-optimized"
+        );
+        assert_eq!(
+            mem::size_of::<Option<doc::Id>>(),
+            mem::size_of::<doc::Id>(),
+            "doc::Id should be niche-optimized"
+        );
+    }
+
+    /// The source text of the name a node declares.
+    fn declared_name(unit: &Unit<'_>, node: &Node<'_>) -> String {
+        node_name(unit, &node.kind())
+    }
+
+    #[test]
+    fn declarations_parent_to_the_construct_that_encloses_them() {
+        let unit = config().unit(
+            Path::new("<test>"),
+            b"class Point\n  pub field x = 0\n\n  pub def (init) self x\n    self.x = x\n\n  def hidden self\n    let local = 1\n",
+        );
+        let tree = tree(&unit);
+
+        // The class is the parent of its members; the members are the parents of
+        // their own parameters and bindings.
+        assert!(tree.contains(&("class", "Point".into(), None)));
+        assert!(tree.contains(&("field", "x".into(), Some("Point".into()))));
+        assert!(tree.contains(&("special_method", "(init)".into(), Some("Point".into()))));
+        assert!(tree.contains(&("method", "hidden".into(), Some("Point".into()))));
+        assert!(tree.contains(&("self", "self".into(), Some("(init)".into()))));
+        assert!(tree.contains(&("param", "x".into(), Some("(init)".into()))));
+        assert!(tree.contains(&("bind", "local".into(), Some("hidden".into()))));
+    }
+
+    /// A method reports its visibility; a special method has none to report.
+    ///
+    /// A special method is part of the type's interface however it was
+    /// declared, so it is a kind of its own rather than a `Method` carrying an
+    /// option that says to ignore its visibility.
+    #[test]
+    fn methods_record_visibility_and_special_methods_name_their_protocol() {
+        let unit = config().unit(
+            Path::new("<test>"),
+            b"class Point\n  pub def (init) self\n    self\n\n  def (str) self\n    self\n\n  pub def visible self\n    self\n\n  def hidden self\n    self\n",
+        );
+        let mut methods = Vec::new();
+        let mut special = Vec::new();
+        for (_, node) in unit.nodes() {
+            let kind = node.kind();
+            match kind {
+                Kind::Method { is_pub, .. } => methods.push((node_name(&unit, &kind), is_pub)),
+                Kind::SpecialMethod { .. } => special.push(node_name(&unit, &kind)),
+                _ => {}
+            }
+        }
+        methods.sort();
+        special.sort();
+        assert_eq!(
+            methods,
+            vec![("hidden".to_string(), false), ("visible".to_string(), true)]
+        );
+        // `(str)` is declared without `pub`, but it is interface all the same.
+        assert_eq!(special, vec!["(init)".to_string(), "(str)".to_string()]);
+    }
+
+    #[test]
+    fn parameters_record_form_and_whether_they_have_a_default() {
+        let unit = config().unit(
+            Path::new("<test>"),
+            b"def connect host :port = 8080 ...rest\n  nil\n\ndef ignore first ...\n  first\n",
+        );
+        let mut params = Vec::new();
+        for (_, node) in unit.nodes() {
+            if let Kind::Param {
+                name,
+                form,
+                default,
+            } = node.kind()
+            {
+                let name = name.as_ref().map(|name| {
+                    unit.compiler
+                        .file
+                        .str(source::Span {
+                            start: name.start().byte_offset() as source::Offset,
+                            end: name.end().byte_offset() as source::Offset,
+                        })
+                        .to_owned()
+                });
+                params.push((name, kind_of_form(&form), default.is_some()));
+            }
+        }
+        // An anonymous `...` binds nothing, so it has no name — but it is part
+        // of the signature and so must still be a node.
+        assert_eq!(
+            params,
+            vec![
+                (Some("host".to_string()), "positional", false),
+                (Some("port".to_string()), "key", true),
+                (Some("rest".to_string()), "rest", false),
+                (Some("first".to_string()), "positional", false),
+                (None, "rest", false),
+            ]
+        );
+    }
+
+    fn kind_of_form(form: &ParamForm) -> &'static str {
+        match form {
+            ParamForm::Positional => "positional",
+            ParamForm::Key { .. } => "key",
+            ParamForm::Rest => "rest",
+        }
+    }
+
+    #[test]
+    fn jumps_name_the_construct_they_target() {
+        let unit = config().unit(
+            Path::new("<test>"),
+            b"def loop_forever count\n  while (count > 0)\n    break\n  return 1\n",
+        );
+        let target_kind = |id: Option<NodeId>| {
+            id.and_then(|id| unit.node(id))
+                .map(|node| kind_name(&node.kind()))
+        };
+        let mut jumps = Vec::new();
+        for (_, node) in unit.nodes() {
+            match node.kind() {
+                // A local `break` records nothing in the elaborator's non-local
+                // jump bookkeeping, so this would be empty if the node stream
+                // only reported the non-local case.
+                Kind::Break { target } => jumps.push(("break", target_kind(target))),
+                Kind::Return { target } => jumps.push(("return", target_kind(target))),
+                _ => {}
+            }
+        }
+        jumps.sort();
+        assert_eq!(
+            jumps,
+            vec![("break", Some("while")), ("return", Some("function"))]
+        );
+    }
+
+    #[test]
+    fn sibling_constructs_that_bind_the_same_name_stay_distinct() {
+        // Both handlers bind `err`.  Without a node per handler they would share
+        // a parent, and anything keyed on (parent, name) would silently collide.
+        let unit = config().unit(
+            Path::new("<test>"),
+            b"import std\ndef risky x\n  try\n    x\n  catch std.TypeError: err\n    err\n  catch err\n    err\n",
+        );
+        let catches: Vec<_> = unit
+            .nodes()
+            .filter(|(_, node)| matches!(node.kind(), Kind::Catch))
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(catches.len(), 2);
+
+        let binds: Vec<_> = unit
+            .nodes()
+            .filter_map(|(_, node)| match node.kind() {
+                Kind::Param { .. } => node.parent(),
+                _ => None,
+            })
+            .filter(|parent| catches.contains(parent))
+            .collect();
+        assert_eq!(binds.len(), 2);
+        assert_ne!(binds[0], binds[1]);
+    }
+
+    #[test]
+    fn decorators_are_nodes_naming_what_they_resolve_to() {
+        let mut config = Config::new();
+        config
+            .prelude()
+            .clear()
+            .import_items("std")
+            .items(["getter"])
+            .commit();
+        let unit = config.unit(
+            Path::new("<test>"),
+            b"class Point\n  #[getter]\n  pub def x self\n    0\n",
+        );
+
+        let getter = unit
+            .nodes()
+            .find(|(_, node)| matches!(node.kind(), Kind::PreludeItem { item: "getter", .. }))
+            .map(|(id, _)| id)
+            .expect("prelude `getter` should be a node");
+
+        let decorator = unit
+            .nodes()
+            .find_map(|(_, node)| match node.kind() {
+                Kind::Decorator { target } => Some((node.parent(), target)),
+                _ => None,
+            })
+            .expect("decorator should be a node");
+        assert_eq!(decorator.1, Some(getter));
+
+        // The decorator hangs off the method it decorates, so a consumer needs
+        // no source text to know which declaration carries it.
+        let method = unit
+            .nodes()
+            .find(|(_, node)| matches!(node.kind(), Kind::Method { .. }))
+            .map(|(id, _)| id);
+        assert_eq!(decorator.0, method);
+    }
+
+    #[test]
+    fn unused_prelude_imports_are_not_surfaced() {
+        let mut config = Config::new();
+        config
+            .prelude()
+            .clear()
+            .import_items("std")
+            .items(["getter", "static"])
+            .commit();
+        let unit = config.unit(
+            Path::new("<test>"),
+            b"class Point\n  #[getter]\n  pub def x self\n    0\n",
+        );
+
+        let items: Vec<_> = unit
+            .nodes()
+            .filter_map(|(_, node)| match node.kind() {
+                Kind::PreludeItem { item, .. } => Some(item),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(items, vec!["getter"]);
+    }
+    #[test]
+    fn superclasses_name_the_import_they_resolve_to() {
+        let unit = config().unit(
+            Path::new("<test>"),
+            b"import std\nimport std:\n  - Record\n\nclass Named: Record\n  pub field name = nil\n\nclass Tagged: std.Record\n  pub field tag = nil\n",
+        );
+        let item = unit
+            .nodes()
+            .find(|(_, node)| matches!(node.kind(), Kind::ImportItem { .. }))
+            .map(|(id, _)| id)
+            .expect("`Record` should be an import item");
+
+        let supers: Vec<_> = unit
+            .nodes()
+            .filter_map(|(_, node)| match node.kind() {
+                Kind::Class { supers, .. } => Some((
+                    declared_name(&unit, &node),
+                    supers.map(|s| s.target).collect::<Vec<_>>(),
+                )),
+                _ => None,
+            })
+            .collect();
+
+        // A bare identifier resolves to the declaration it names; a dotted path
+        // is an expression, so there is nothing to point at and the consumer is
+        // left with the span.
+        assert_eq!(
+            supers,
+            vec![
+                ("Named".to_string(), vec![Some(item)]),
+                ("Tagged".to_string(), vec![None]),
+            ]
+        );
+    }
+
+    #[test]
+    fn field_decorators_resolve_to_the_prelude_item_that_names_the_scope() {
+        let mut config = Config::new();
+        config
+            .prelude()
+            .clear()
+            .import_items("std")
+            .items(["class", "static"])
+            .commit();
+        let unit = config.unit(
+            Path::new("<test>"),
+            b"class Counter\n  #[class]\n  pub field total = 0\n\n  pub field n = 0\n",
+        );
+
+        let prelude: Vec<_> = unit
+            .nodes()
+            .filter_map(|(id, node)| match node.kind() {
+                Kind::PreludeItem { item, .. } => Some((item, id)),
+                _ => None,
+            })
+            .collect();
+        let class = prelude
+            .iter()
+            .find(|(item, _)| *item == "class")
+            .map(|(_, id)| *id)
+            .expect("prelude `class` should be a node");
+
+        // `#[class]` is a decorator node parented to the field, targeting the
+        // prelude import — the same test the elaborator applies, so a consumer
+        // decides field scope by identity rather than by matching source text.
+        let decorated: Vec<_> = unit
+            .nodes()
+            .filter_map(|(_, node)| match node.kind() {
+                Kind::Decorator { target } => Some((node.parent(), target)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(decorated.len(), 1);
+        assert_eq!(decorated[0].1, Some(class));
+
+        let total = unit
+            .nodes()
+            .find(|(_, node)| {
+                matches!(node.kind(), Kind::Field { .. }) && declared_name(&unit, node) == "total"
+            })
+            .map(|(id, _)| id);
+        assert_eq!(decorated[0].0, total);
     }
 }

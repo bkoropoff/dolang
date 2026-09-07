@@ -11,7 +11,7 @@ use std::{
 
 use crate::{
     ast::visit::{Node, NodeKind, Token, Visit},
-    origin,
+    doc,
     source::File,
 };
 
@@ -35,22 +35,22 @@ pub(crate) struct Var {
     pub(crate) exported: bool,
     // Used?
     pub(crate) used: bool,
-    // Origin tracking ID
-    pub(crate) origin: origin::Id,
+    // Document node for the declaration that bound this
+    pub(crate) node: doc::Id,
 }
 
 impl Var {
-    pub(crate) fn is_emitted(&self, origintab: &origin::Table) -> bool {
-        !self.is_prelude(origintab) || self.used || self.exported
+    pub(crate) fn is_emitted(&self, doctab: &doc::Table) -> bool {
+        !self.is_prelude(doctab) || self.used || self.exported
     }
-    pub(crate) fn is_prelude(&self, origintab: &origin::Table) -> bool {
+    pub(crate) fn is_prelude(&self, doctab: &doc::Table) -> bool {
         matches!(
-            origintab[self.origin],
-            origin::Origin::PreludeModule { .. } | origin::Origin::PreludeItem { .. }
+            doctab[self.node].kind,
+            doc::Kind::PreludeModule { .. } | doc::Kind::PreludeItem { .. }
         )
     }
-    pub(crate) fn is_synthetic(&self, origintab: &origin::Table) -> bool {
-        matches!(origintab[self.origin], origin::Origin::Synthetic)
+    pub(crate) fn is_synthetic(&self) -> bool {
+        self.node == doc::Table::SYNTHETIC
     }
 }
 
@@ -58,7 +58,7 @@ impl Var {
 pub(crate) struct Res {
     pub(crate) index: usize,
     pub(crate) depth: usize,
-    pub(crate) origin: origin::Id,
+    pub(crate) node: doc::Id,
 }
 
 /// Information for a non-local jump (break/continue/return across closure boundary)
@@ -88,7 +88,7 @@ impl Node for Ident {
         visit.token(
             Token::Variable,
             self.span,
-            self.res.as_ref().map(|r| r.origin),
+            self.res.as_ref().map(|r| r.node),
         )
     }
 
@@ -1437,7 +1437,7 @@ impl Node for Param {
                 visit.token(
                     Token::Variable,
                     ident.span,
-                    ident.res.as_ref().map(|r| r.origin),
+                    ident.res.as_ref().map(|r| r.node),
                 )?;
                 if let Some(default) = default {
                     visit.token(Token::Delim, default.delim_span, None)?;
@@ -1455,7 +1455,7 @@ impl Node for Param {
                 visit.token(
                     Token::Variable,
                     ident.span,
-                    ident.res.as_ref().map(|r| r.origin),
+                    ident.res.as_ref().map(|r| r.node),
                 )?;
                 if let Some(default) = default {
                     visit.token(Token::Delim, default.delim_span, None)?;
@@ -1475,7 +1475,7 @@ impl Node for Param {
                 visit.token(
                     Token::Variable,
                     ident.span,
-                    ident.res.as_ref().map(|r| r.origin),
+                    ident.res.as_ref().map(|r| r.node),
                 )?;
                 if let Some(default) = default {
                     visit.token(Token::Delim, default.delim_span, None)?;
@@ -1492,7 +1492,7 @@ impl Node for Param {
                     visit.token(
                         Token::Variable,
                         ident.span,
-                        ident.res.as_ref().map(|r| r.origin),
+                        ident.res.as_ref().map(|r| r.node),
                     )?;
                 }
                 ControlFlow::Continue(())
@@ -1892,7 +1892,7 @@ impl Node for Def {
         visit.token(
             Token::Variable,
             self.ident.span,
-            self.ident.res.as_ref().map(|r| r.origin),
+            self.ident.res.as_ref().map(|r| r.node),
         )?;
         visit.node(&self.func)
     }
@@ -1907,7 +1907,7 @@ pub(crate) struct Method {
     pub(crate) decorators: Vec<Decorator>,
     pub(crate) name_span: Span,
     pub(crate) special: Option<SpecialMethod>,
-    pub(crate) origin: Option<origin::Id>,
+    pub(crate) node: Option<doc::Id>,
     pub(crate) private_sym: Option<sym::Id>,
     pub(crate) func: Function,
     pub(crate) pub_span: Option<Span>,
@@ -1920,7 +1920,7 @@ impl Node for Method {
             visit.token(Token::Keyword, span, None)?;
         }
         visit.token(Token::Keyword, self.def_span, None)?;
-        visit.token(Token::Method, self.name_span, self.origin)?;
+        visit.token(Token::Method, self.name_span, self.node)?;
         visit.node(&self.func)
     }
 
@@ -2036,7 +2036,7 @@ impl Node for Class {
         visit.token(
             Token::Variable,
             self.ident.span,
-            self.ident.res.as_ref().map(|r| r.origin),
+            self.ident.res.as_ref().map(|r| r.node),
         )?;
         if let Some(colon_span) = self.colon_span {
             visit.token(Token::Delim, colon_span, None)?;
@@ -2106,7 +2106,7 @@ impl Node for ClassMember {
 
 pub(crate) struct FieldName {
     pub(crate) ident: Ident,
-    pub(crate) origin: Option<origin::Id>,
+    pub(crate) node: Option<doc::Id>,
     pub(crate) private_sym: Option<sym::Id>,
 }
 
@@ -2154,7 +2154,7 @@ impl Node for FieldDecl {
         }
         visit.token(Token::Keyword, self.field_span, None)?;
         for field in &self.fields {
-            visit.token(Token::Field, field.ident.span, field.origin)?;
+            visit.token(Token::Field, field.ident.span, field.node)?;
         }
         if let Some(span) = self.equal_span {
             visit.token(Token::Operator, span, None)?;

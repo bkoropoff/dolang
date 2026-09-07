@@ -1,0 +1,58 @@
+import std:
+  - Record
+
+import std
+
+# A greeting.
+#
+# Spans several lines.
+pub def greet name :greeting = hello ...rest
+  echo $greeting $name ...rest
+
+# Not exported, so it is omitted unless everything is asked for.
+def internal x
+  $x
+
+# The module's default name.
+pub let default_name = world
+
+# A private module-level binding.
+let secret = shhh
+
+# A named point.
+pub class Point: Record
+  # The horizontal coordinate.
+  pub field x = 0
+
+  # How many points exist.
+  #[class]
+  pub field count = 0
+
+  # A shared origin.
+  #[static]
+  pub field origin = nil
+
+  # Build a point.
+  pub def (init) self x
+    self.x = x
+
+  # Render it.
+  pub def (str) self
+    str $self.x
+
+  # The coordinate, read as a field.
+  #[getter]
+  pub def horizontal self
+    self.x
+
+  # Move it.
+  pub def shift self by :clamp = false
+    self.x = (self.x + by)
+
+  # Not exported.
+  def helper self
+    nil
+
+# Inherits through a module path rather than an imported item.
+pub class Tagged: std.Record
+  pub field tag = nil

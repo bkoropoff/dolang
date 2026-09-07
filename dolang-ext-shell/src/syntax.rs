@@ -1,12 +1,18 @@
 use std::{cmp::Reverse, ops::Range};
 
 use anstyle::{AnsiColor, Style};
-use dolang::compile::{Context, Origin, Span, Token};
+use dolang::compile::{Context, Kind, Span, Token};
 
-pub type SemanticToken = (Token, Span, Option<Origin>, Context);
+/// A token together with what it refers to, ready to be colored.
+///
+/// The classification is resolved when the token is collected rather than
+/// carried as a node identity, because a [`Kind`] borrows the unit that
+/// produced it and these outlive that borrow.
+pub type SemanticToken = (Token, Span, NodeClass, Context);
 
+/// What a token refers to, at the granularity coloring cares about.
 #[derive(Clone, Copy)]
-enum OriginClass {
+pub enum NodeClass {
     Normal,
     Param,
     Function,
@@ -15,21 +21,26 @@ enum OriginClass {
     PreludeModule,
 }
 
-fn classify_origin(origin: Option<&Origin>) -> OriginClass {
-    match origin {
-        None | Some(Origin::Bind { .. }) | Some(Origin::Field { .. }) => OriginClass::Normal,
-        Some(Origin::Param { .. }) | Some(Origin::SelfParam { .. }) => OriginClass::Param,
-        Some(Origin::Class { .. }) | Some(Origin::Def { .. }) | Some(Origin::Method { .. }) => {
-            OriginClass::Function
-        }
-        Some(Origin::ImportModule { .. }) => OriginClass::Module,
-        Some(Origin::ImportItem { .. }) => OriginClass::Normal,
-        Some(Origin::PreludeItem { .. }) => OriginClass::Prelude,
-        Some(Origin::PreludeModule { .. }) => OriginClass::PreludeModule,
+/// Classify what a token refers to.
+///
+/// Pass the [`Kind`] of the node the token names, if it names one.
+pub fn classify_node(kind: Option<&Kind<'_>>) -> NodeClass {
+    match kind {
+        Some(Kind::Param { .. } | Kind::SelfParam { .. }) => NodeClass::Param,
+        Some(
+            Kind::Class { .. }
+            | Kind::Function { .. }
+            | Kind::Method { .. }
+            | Kind::SpecialMethod { .. },
+        ) => NodeClass::Function,
+        Some(Kind::ImportModule { .. }) => NodeClass::Module,
+        Some(Kind::PreludeItem { .. }) => NodeClass::Prelude,
+        Some(Kind::PreludeModule { .. }) => NodeClass::PreludeModule,
+        _ => NodeClass::Normal,
     }
 }
 
-fn token_style(token: Token, origin: Option<&Origin>, context: Context) -> Option<Style> {
+fn token_style(token: Token, class: NodeClass, context: Context) -> Option<Style> {
     let color = match token {
         Token::Comment => {
             return Some(
@@ -53,13 +64,13 @@ fn token_style(token: Token, origin: Option<&Origin>, context: Context) -> Optio
         Token::Sigil => AnsiColor::White,
         Token::Variable => match context {
             Context::Call => AnsiColor::Blue,
-            Context::None => match classify_origin(origin) {
-                OriginClass::Function => AnsiColor::Blue,
-                OriginClass::Module | OriginClass::Param | OriginClass::PreludeModule => {
+            Context::None => match class {
+                NodeClass::Function => AnsiColor::Blue,
+                NodeClass::Module | NodeClass::Param | NodeClass::PreludeModule => {
                     AnsiColor::Magenta
                 }
-                OriginClass::Prelude => AnsiColor::Cyan,
-                OriginClass::Normal => return None,
+                NodeClass::Prelude => AnsiColor::Cyan,
+                NodeClass::Normal => return None,
             },
         },
     };
@@ -102,7 +113,7 @@ pub fn highlight_range(
 
     let mut out = String::new();
     let mut last_end = range.start;
-    for (token, span, origin, context) in sorted {
+    for (token, span, class, context) in sorted {
         let start = span.start().byte_offset().max(range.start).max(last_end);
         let end = span.end().byte_offset().min(range.end);
         if end <= start {
@@ -114,7 +125,7 @@ pub fn highlight_range(
         push_styled(
             &mut out,
             &source[start..end],
-            token_style(*token, origin.as_ref(), *context),
+            token_style(*token, *class, *context),
             color,
         );
         last_end = end;
@@ -129,7 +140,7 @@ pub fn highlight_range(
 mod tests {
     use std::path::Path;
 
-    use dolang::compile::Config;
+    use dolang::compile::{Config, NodeId};
 
     use super::*;
 
@@ -137,12 +148,13 @@ mod tests {
     fn highlights_a_source_range_without_changing_plain_text() {
         let source = "let answer = 42";
         let mut tokens = Vec::new();
-        Config::new()
+        let unit = Config::new()
             .recover(true)
-            .unit(Path::new("example.dol"), source.as_bytes())
-            .tokens(&mut |token, span, origin, context| {
-                tokens.push((token, span, origin, context));
-            });
+            .unit(Path::new("example.dol"), source.as_bytes());
+        unit.tokens(&mut |token, span, node: Option<NodeId>, context| {
+            let kind = node.and_then(|id| unit.node(id)).map(|node| node.kind());
+            tokens.push((token, span, classify_node(kind.as_ref()), context));
+        });
         assert_eq!(
             highlight_range(source, &tokens, 0..source.len(), false),
             source

@@ -3,7 +3,7 @@ use std::{borrow::Cow, path::Path, string::String};
 use dolang::runtime::value::fmt::Format;
 
 use dolang::{
-    compile::{Context, Mode, Origin, Span, Token},
+    compile::{Context, Mode, NodeId, Span, Token},
     runtime::{
         Bytecode, Error, Instance, Object, Result, Slot, Strand, Sym, error::ResultExt, value::Root,
     },
@@ -19,6 +19,8 @@ use rustyline::{
     history::DefaultHistory,
     validate::{ValidationContext, ValidationResult, Validator},
 };
+
+use dolang_ext_shell::classify_node;
 
 use crate::{cli::PreludeImport, load};
 
@@ -152,18 +154,18 @@ impl Hinter for DoHelper {
 impl Highlighter for DoHelper {
     fn highlight<'l>(&self, line: &'l str, _pos: usize) -> Cow<'l, str> {
         let mut tokens = Vec::new();
-        load::unit(
+        let unit = load::unit(
             Path::new("<repl>"),
             line,
             Some(&self.dynamic_prelude),
             &self.prelude,
-        )
-        .tokens(&mut |token: Token,
-                               span: Span,
-                               origin: Option<Origin>,
-                               context: Context| {
-            tokens.push((token, span, origin, context));
-        });
+        );
+        unit.tokens(
+            &mut |token: Token, span: Span, node: Option<NodeId>, context: Context| {
+                let kind = node.and_then(|id| unit.node(id)).map(|node| node.kind());
+                tokens.push((token, span, classify_node(kind.as_ref()), context));
+            },
+        );
 
         if tokens.is_empty() {
             return Cow::Borrowed(line);

@@ -137,7 +137,7 @@ class DoLexer(Lexer):
             # Map Do token kind to Pygments token type
             token_type = self._map_token_type(token_info)
 
-            # Apply origin/context modifiers for richer highlighting
+            # Apply node/context modifiers for richer highlighting
             token_type = self._apply_modifiers(token_type, token_info)
 
             token_candidates.append((start_index, priority, token_type, token_text))
@@ -254,19 +254,19 @@ class DoLexer(Lexer):
         return base_token
 
     def _apply_modifiers(self, base_token: Token, token_info: Dict[str, Any]) -> Token:
-        origin = token_info.get("origin")
+        node = token_info.get("node")
         context = token_info.get("context")
 
-        # Origin-based modifiers
-        if origin == "class":
+        # What the name refers to, if it refers to a declaration
+        if node == "class":
             base_token = Name.Class
-        elif origin == "def":
+        elif node in ("function", "method", "special_method"):
             base_token = Name.Function
-        elif origin == "param":
+        elif node in ("param", "self_param"):
             base_token = Name.Variable.Magic
-        elif origin == "import_module":
+        elif node == "import_module":
             base_token = Name.Namespace
-        elif origin in ("prelude_item", "prelude_module"):
+        elif node in ("prelude_item", "prelude_module"):
             base_token = Name.Builtin
 
         # Context-based modifiers

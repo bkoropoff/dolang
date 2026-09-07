@@ -53,7 +53,9 @@ use crate::global::Global;
 pub use diagnostic::{print_compile_diag_stderr, print_error_stderr, render_message_backtrace};
 use dolang_vfs::path as vfs_path;
 #[doc(hidden)]
-pub use syntax::{SemanticToken, highlight_range as highlight_source_range};
+pub use syntax::{
+    NodeClass, SemanticToken, classify_node, highlight_range as highlight_source_range,
+};
 
 /// Instantiate the `shell.stdin` handle.
 ///

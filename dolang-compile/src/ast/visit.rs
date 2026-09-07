@@ -5,7 +5,7 @@ use std::{
 
 use crate::source::Span;
 
-use super::origin;
+use super::doc;
 
 pub trait Node {
     const TRANSPARENT: bool = false;
@@ -43,7 +43,7 @@ impl Visit for SpanVisit {
         &mut self,
         _leaf: Token,
         span: Span,
-        _origin: Option<origin::Id>,
+        _node: Option<doc::Id>,
     ) -> ControlFlow<Self::Break> {
         self.0 = self.0 | span;
         ControlFlow::Continue(())
@@ -95,7 +95,7 @@ pub trait Visit {
         &mut self,
         token: Token,
         span: Span,
-        origin: Option<origin::Id>,
+        node: Option<doc::Id>,
     ) -> ControlFlow<Self::Break>;
 }
 

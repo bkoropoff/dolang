@@ -8,12 +8,12 @@ use std::{
 
 use anstyle::{AnsiColor, Style};
 use dolang::{
-    compile::{Config, Diag},
+    compile::{Config, Diag, NodeId},
     runtime::{Error, Frame, Result, Strand, Value},
 };
 
 use crate::{
-    syntax::{SemanticToken, highlight_range},
+    syntax::{SemanticToken, classify_node, highlight_range},
     term,
 };
 
@@ -34,12 +34,11 @@ impl SourceFile {
     fn open(path: &Path) -> Option<Self> {
         let source = fs::read_to_string(path).ok()?;
         let mut tokens = Vec::new();
-        Config::new()
-            .recover(true)
-            .unit(path, source.as_bytes())
-            .tokens(&mut |token, span, origin, context| {
-                tokens.push((token, span, origin, context));
-            });
+        let unit = Config::new().recover(true).unit(path, source.as_bytes());
+        unit.tokens(&mut |token, span, node: Option<NodeId>, context| {
+            let kind = node.and_then(|id| unit.node(id)).map(|node| node.kind());
+            tokens.push((token, span, classify_node(kind.as_ref()), context));
+        });
         Some(Self { source, tokens })
     }
 

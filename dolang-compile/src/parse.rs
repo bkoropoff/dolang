@@ -4345,7 +4345,7 @@ impl<'a> Parser<'a> {
             decorators,
             name_span,
             special,
-            origin: None,
+            node: None,
             private_sym: None,
             func,
             pub_span,
@@ -4410,7 +4410,7 @@ impl<'a> Parser<'a> {
                     .into_iter()
                     .map(|span| FieldName {
                         ident: Ident::new(span),
-                        origin: None,
+                        node: None,
                         private_sym: None,
                     })
                     .collect(),
@@ -4428,7 +4428,7 @@ impl<'a> Parser<'a> {
                 .into_iter()
                 .map(|span| FieldName {
                     ident: Ident::new(span),
-                    origin: None,
+                    node: None,
                     private_sym: None,
                 })
                 .collect(),

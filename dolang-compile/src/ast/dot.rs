@@ -3,7 +3,7 @@ use std::{fmt::Write, io, ops::ControlFlow};
 use dot_writer::{Attributes, Color, NodeId, Shape, Style};
 
 use super::{Node, NodeKind, Token, Visit};
-use crate::{Compiler, origin, source::Span};
+use crate::{Compiler, doc, source::Span};
 
 /// A visitor that generates graphviz DOT output for the AST
 pub struct DotVisitor<'a, 'b> {
@@ -106,7 +106,7 @@ impl<'a, 'b> Visit for DotVisitor<'a, 'b> {
         &mut self,
         token: Token,
         span: Span,
-        _origin: Option<origin::Id>,
+        _node: Option<doc::Id>,
     ) -> ControlFlow<Self::Break> {
         let label = self.make_token_label(token, span);
 
