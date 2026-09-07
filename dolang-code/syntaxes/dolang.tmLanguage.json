@@ -84,14 +84,56 @@
             },
             "name": "string.quoted.double.dol",
             "patterns": [
+                { "include": "#escape" },
+                { "include": "#string_interp_braces" },
+                { "include": "#string_interp_param" },
                 { "include": "#string_interp" },
-                { "include": "#string_interp_parens" },
-                { "include": "#escape" }
+                { "include": "#string_interp_parens" }
             ]
         },
         "string_interp": {
             "match": "\\$[A-Za-z0-9_]+",
             "name": "variable.other.normal.dol"
+        },
+        "string_interp_param": {
+            "match": "(\\$#)([A-Za-z_][A-Za-z0-9_]*|[0-9]+)",
+            "name": "variable.other.normal.dol"
+        },
+        "string_interp_braces": {
+            "begin": "(\\$)(\\{)(#)?",
+            "end": "\\}",
+            "beginCaptures": {
+                "1": { "name": "variable.other.normal.dol" },
+                "2": { "name": "punctuation.section.brace.begin.dol" },
+                "3": { "name": "variable.other.normal.dol" }
+            },
+            "endCaptures": {
+                "0": { "name": "punctuation.section.brace.end.dol" }
+            },
+            "patterns": [
+                { "include": "#string" },
+                { "include": "#symbol" },
+                { "include": "#fmt_spec" },
+                { "include": "#number" },
+                { "include": "#constant" },
+                { "include": "#full_expr" },
+                { "include": "#ellipsis" },
+                { "include": "#operator" },
+                { "include": "#delimiter" },
+                { "include": "#identifier" }
+            ]
+        },
+        "fmt_spec": {
+            "begin": ":",
+            "end": "(?=\\})",
+            "beginCaptures": {
+                "0": { "name": "punctuation.separator.dol" }
+            },
+            "name": "constant.other.format.dol",
+            "patterns": [
+                { "include": "#string_interp_parens" },
+                { "include": "#string_interp" }
+            ]
         },
         "string_interp_parens": {
             "begin": "(\\$)(\\()",

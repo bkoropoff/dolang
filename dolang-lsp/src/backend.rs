@@ -172,7 +172,8 @@ fn static_fields(unit: &Unit<'_>) -> HashSet<NodeId> {
 /// in an outline, so it is skipped and whatever it holds reparents onto the
 /// nearest declaration around it.  Prelude bindings are skipped for the
 /// opposite reason — they are real declarations, but they have no source text
-/// in this document to point at.
+/// in this document to point at.  A binding spelled `_` is skipped because it
+/// is how a result is discarded: it declares nothing anyone navigates to.
 fn symbol_kind(kind: &Kind<'_>, content: &str) -> Option<SymbolKind> {
     Some(match kind {
         Kind::Class { .. } => SymbolKind::CLASS,
@@ -186,6 +187,7 @@ fn symbol_kind(kind: &Kind<'_>, content: &str) -> Option<SymbolKind> {
             }
         }
         Kind::Field { .. } => SymbolKind::FIELD,
+        Kind::Bind { name, .. } if span_text(content, name) == "_" => return None,
         Kind::Bind { .. } => SymbolKind::VARIABLE,
         Kind::ImportModule { .. } | Kind::ImportItem { .. } => SymbolKind::NAMESPACE,
         _ => return None,
@@ -211,6 +213,11 @@ fn build_symbols(unit: &Unit<'_>, index: &DocumentIndex<'_>) -> Vec<DocumentSymb
         let Some(symbol_kind) = symbol_kind(&kind, content) else {
             continue;
         };
+        // The span of a special method names the identifier alone; the
+        // parentheses are what say it implements a protocol rather than being
+        // a method someone calls by that name, so the outline spells it the
+        // way the source does.
+        let special = matches!(kind, Kind::SpecialMethod { .. });
         let Some(name) = definition_span(kind) else {
             continue;
         };
@@ -223,7 +230,14 @@ fn build_symbols(unit: &Unit<'_>, index: &DocumentIndex<'_>) -> Vec<DocumentSymb
         of_node.insert(id, ids.len());
         ids.push(id);
         symbols.push(Some(DocumentSymbol {
-            name: span_text(content, &name).to_owned(),
+            name: {
+                let text = span_text(content, &name);
+                if special {
+                    format!("({text})")
+                } else {
+                    text.to_owned()
+                }
+            },
             detail: None,
             kind: symbol_kind,
             tags: None,
@@ -1694,7 +1708,7 @@ mod tests {
                     SymbolKind::CLASS,
                     vec![
                         ("v".to_owned(), SymbolKind::FIELD),
-                        ("init".to_owned(), SymbolKind::CONSTRUCTOR),
+                        ("(init)".to_owned(), SymbolKind::CONSTRUCTOR),
                         ("get".to_owned(), SymbolKind::METHOD),
                     ],
                 ),
@@ -1706,6 +1720,60 @@ mod tests {
         let describe = &symbols[1];
         assert!(describe.range.start <= describe.selection_range.start);
         assert!(describe.selection_range.end <= describe.range.end);
+    }
+
+    /// A special method is named the way it is written, and `_` is not named.
+    ///
+    /// The node's name span covers the identifier alone, so the outline has to
+    /// put the parentheses back to say the method implements a protocol.  A
+    /// binding spelled `_` goes the other way: it is how a result is thrown
+    /// away, so an outline pane has nothing to offer for it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn document_symbol_parenthesizes_special_methods_and_omits_discards() {
+        let mut harness = Harness::new();
+        harness.initialize(vec![PositionEncodingKind::UTF16]).await;
+        let uri: Uri = "file:///document-symbol-names-test.dol".parse().unwrap();
+        let source = concat!(
+            "class Box\n",
+            "  pub def (init) self\n",
+            "    self\n",
+            "\n",
+            "  pub def (str) self\n",
+            "    empty\n",
+            "\n",
+            "let _ = Box()\n",
+            "let _kept = 1\n",
+        );
+        harness.open(uri.clone(), source, 1).await;
+
+        let response = harness
+            .send_request::<request::DocumentSymbolRequest>(DocumentSymbolParams {
+                text_document: TextDocumentIdentifier { uri },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            })
+            .await
+            .unwrap();
+        let symbols = match response {
+            DocumentSymbolResponse::Nested(symbols) => symbols,
+            DocumentSymbolResponse::Flat(_) => panic!("expected a nested symbol response"),
+        };
+
+        assert_eq!(
+            outline(&symbols),
+            vec![
+                (
+                    "Box".to_owned(),
+                    SymbolKind::CLASS,
+                    vec![
+                        ("(init)".to_owned(), SymbolKind::CONSTRUCTOR),
+                        ("(str)".to_owned(), SymbolKind::METHOD),
+                    ],
+                ),
+                // `_` is discarded; only a name that starts with it survives.
+                ("_kept".to_owned(), SymbolKind::VARIABLE, vec![]),
+            ]
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
