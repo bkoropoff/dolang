@@ -1,6 +1,6 @@
 use std::{
     borrow::Cow,
-    collections::{HashMap, hash_map::Entry},
+    collections::{HashMap, HashSet, hash_map::Entry},
     fs, mem,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
@@ -12,9 +12,14 @@ use tower_lsp_server::{
     Client, ClientSocket, LanguageServer, LspService, jsonrpc::Result, ls_types::*,
 };
 
-use dolang_compile::{Config as CompileConfig, Context, Kind, NodeId, Token, diag};
+use dolang_compile::{Config as CompileConfig, Context, Kind, NodeId, Token, Unit, diag};
 
-const TOKEN_MODIFIERS: &[SemanticTokenModifier] = &[SemanticTokenModifier::DEFAULT_LIBRARY];
+const TOKEN_MODIFIERS: &[SemanticTokenModifier] = &[
+    SemanticTokenModifier::DEFAULT_LIBRARY,
+    SemanticTokenModifier::DECLARATION,
+    SemanticTokenModifier::DEFINITION,
+    SemanticTokenModifier::STATIC,
+];
 const CONFIG_FILE_NAME: &str = ".dolang-lsp.toml";
 
 const LEGEND_TYPES: &[SemanticTokenType] = &[
@@ -45,7 +50,10 @@ const TT_NAMESPACE: u32 = 9;
 const TT_COMMENT: u32 = 10;
 const TT_CLASS: u32 = 11;
 
-const MOD_PRELUDE: u32 = 1;
+const MOD_PRELUDE: u32 = 1 << 0;
+const MOD_DECLARATION: u32 = 1 << 1;
+const MOD_DEFINITION: u32 = 1 << 2;
+const MOD_STATIC: u32 = 1 << 3;
 
 /// Where a name a token refers to was declared, for go-to-definition.
 ///
@@ -105,6 +113,166 @@ fn classify_token(token: Token, kind: Option<&Kind<'_>>, context: Context) -> (u
     }
 }
 
+fn same_span(a: &diag::Span, b: &diag::Span) -> bool {
+    a.start().byte_offset() == b.start().byte_offset()
+        && a.end().byte_offset() == b.end().byte_offset()
+}
+
+/// Modifier bits a token earns from the declaration it names.
+///
+/// A declaration is its own definition in Do, so a token standing where the
+/// name was declared claims both; `statics` holds the fields a `#[class]` or
+/// `#[static]` decorator scoped to the class.
+fn declaration_modifiers(
+    span: &diag::Span,
+    def: &diag::Span,
+    id: NodeId,
+    statics: &HashSet<NodeId>,
+) -> u32 {
+    let mut modifiers = 0;
+    if same_span(span, def) {
+        modifiers |= MOD_DECLARATION | MOD_DEFINITION;
+    }
+    if statics.contains(&id) {
+        modifiers |= MOD_STATIC;
+    }
+    modifiers
+}
+
+/// The fields a `#[class]` or `#[static]` decorator gives class scope.
+///
+/// This is the test the elaborator itself applies: the decorator must resolve
+/// to the prelude binding rather than to anything else spelled `class`, so the
+/// server agrees with the compiler by identity instead of by source text.
+fn static_fields(unit: &Unit<'_>) -> HashSet<NodeId> {
+    unit.nodes()
+        .filter_map(|(_, node)| match node.kind() {
+            Kind::Decorator {
+                target: Some(target),
+            } => Some((node.parent()?, target)),
+            _ => None,
+        })
+        .filter(|(_, target)| {
+            matches!(
+                unit.node(*target).map(|node| node.kind()),
+                Some(Kind::PreludeItem {
+                    module: "std",
+                    item: "class" | "static",
+                    ..
+                })
+            )
+        })
+        .map(|(field, _)| field)
+        .collect()
+}
+
+/// The outline entry a node becomes, or `None` if it is not one.
+///
+/// The structural kinds are containment, not names: an `if` has nothing to put
+/// in an outline, so it is skipped and whatever it holds reparents onto the
+/// nearest declaration around it.  Prelude bindings are skipped for the
+/// opposite reason — they are real declarations, but they have no source text
+/// in this document to point at.
+fn symbol_kind(kind: &Kind<'_>, content: &str) -> Option<SymbolKind> {
+    Some(match kind {
+        Kind::Class { .. } => SymbolKind::CLASS,
+        Kind::Function { .. } => SymbolKind::FUNCTION,
+        Kind::Method { .. } => SymbolKind::METHOD,
+        Kind::SpecialMethod { name } => {
+            if span_text(content, name) == "init" {
+                SymbolKind::CONSTRUCTOR
+            } else {
+                SymbolKind::METHOD
+            }
+        }
+        Kind::Field { .. } => SymbolKind::FIELD,
+        Kind::Bind { .. } => SymbolKind::VARIABLE,
+        Kind::ImportModule { .. } | Kind::ImportItem { .. } => SymbolKind::NAMESPACE,
+        _ => return None,
+    })
+}
+
+fn span_text<'a>(content: &'a str, span: &diag::Span) -> &'a str {
+    &content[span.start().byte_offset()..span.end().byte_offset()]
+}
+
+/// Assemble the document outline from the node table.
+///
+/// Parentage comes from the table, so this walks no syntax: an entry finds its
+/// outline parent by following node parents until one of them is an entry too.
+fn build_symbols(unit: &Unit<'_>, index: &DocumentIndex<'_>) -> Vec<DocumentSymbol> {
+    let content = index.content;
+    let mut ids = Vec::new();
+    let mut symbols = Vec::new();
+    let mut of_node = HashMap::new();
+
+    for (id, node) in unit.nodes() {
+        let kind = node.kind();
+        let Some(symbol_kind) = symbol_kind(&kind, content) else {
+            continue;
+        };
+        let Some(name) = definition_span(kind) else {
+            continue;
+        };
+        let selection_range = index.range_from_span(&name);
+        // A client rejects an outline whose selection range escapes its range,
+        // so take the union rather than trust the two to nest.
+        let mut range = index.range_from_span(&node.span());
+        range.start = range.start.min(selection_range.start);
+        range.end = range.end.max(selection_range.end);
+        of_node.insert(id, ids.len());
+        ids.push(id);
+        symbols.push(Some(DocumentSymbol {
+            name: span_text(content, &name).to_owned(),
+            detail: None,
+            kind: symbol_kind,
+            tags: None,
+            #[allow(deprecated)]
+            deprecated: None,
+            range,
+            selection_range,
+            children: None,
+        }));
+    }
+
+    // The outline parent is the nearest ancestor that is an entry too, so an
+    // `if` or a `for` in between simply disappears.
+    let parents: Vec<Option<usize>> = ids
+        .iter()
+        .map(|id| {
+            let mut cur = unit.node(*id).and_then(|node| node.parent());
+            while let Some(parent) = cur {
+                if let Some(entry) = of_node.get(&parent) {
+                    return Some(*entry);
+                }
+                cur = unit.node(parent).and_then(|node| node.parent());
+            }
+            None
+        })
+        .collect();
+
+    // Fold children into parents from the back: a node is always allocated
+    // after the node that contains it, so every child is finished first.
+    let mut children: Vec<Vec<DocumentSymbol>> = vec![Vec::new(); symbols.len()];
+    let mut roots = Vec::new();
+    for entry in (0..symbols.len()).rev() {
+        debug_assert!(
+            parents[entry].is_none_or(|parent| parent < entry),
+            "a node precedes the node that contains it"
+        );
+        let mut symbol = symbols[entry].take().expect("entry visited once");
+        let mut kids = mem::take(&mut children[entry]);
+        kids.sort_by_key(|child| child.range.start);
+        symbol.children = (!kids.is_empty()).then_some(kids);
+        match parents[entry] {
+            Some(parent) => children[parent].push(symbol),
+            None => roots.push(symbol),
+        }
+    }
+    roots.sort_by_key(|symbol| symbol.range.start);
+    roots
+}
+
 #[derive(Debug, Clone)]
 struct Patch {
     diagnostic_range: Range,
@@ -115,12 +283,38 @@ struct Patch {
     title: String,
 }
 
+/// A declaration, and every token in this document that names it.
+///
+/// The declaration's own name is one of the tokens the elaborator resolves to
+/// it, so it is already in `uses`: `includeDeclaration` takes it out rather
+/// than putting it in.
+#[derive(Debug, Default)]
+struct Decl {
+    name_range: Range,
+    uses: Vec<Range>,
+}
+
 #[derive(Debug, Default)]
 struct Document {
     content: String,
     tokens: Vec<SemanticToken>,
-    defs: Vec<(Range, Range)>,
+    /// Token range to the declaration it names, sorted by range start
+    refs: Vec<(Range, NodeId)>,
+    decls: HashMap<NodeId, Decl>,
+    symbols: Vec<DocumentSymbol>,
     patches: Vec<Patch>,
+}
+
+impl Document {
+    /// The declaration named by the token under `pos`, if any.
+    ///
+    /// `refs` is sorted by where each token starts, so the only candidate is
+    /// the last one starting at or before the position.
+    fn decl_at(&self, pos: &Position) -> Option<&Decl> {
+        let end = self.refs.partition_point(|(range, _)| &range.start <= pos);
+        let (range, id) = self.refs.get(end.checked_sub(1)?)?;
+        (&range.end > pos).then(|| self.decls.get(id))?
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -443,7 +637,8 @@ impl Backend {
             let mut guard = document.lock().await;
             guard.content = text;
             let mut tokens = Vec::new();
-            let mut defs = Vec::new();
+            let mut refs = Vec::new();
+            let mut decls: HashMap<NodeId, Decl> = HashMap::new();
             let mut patches = Vec::new();
 
             let content = guard.content.as_str();
@@ -522,19 +717,32 @@ impl Backend {
                     });
                 }
             }
+            let statics = static_fields(&unit);
             unit.tokens(
                 &mut |leaf, span: diag::Span, node: Option<NodeId>, context: Context| {
                     if span.start().byte_offset() != span.end().byte_offset()
                         && !matches!(leaf, Token::Delim)
                     {
                         let kind = node.and_then(|id| unit.node(id)).map(|node| node.kind());
-                        let (token_type, modifiers) = classify_token(leaf, kind.as_ref(), context);
+                        let (token_type, mut modifiers) =
+                            classify_token(leaf, kind.as_ref(), context);
                         // Prelude bindings have no source text, so there is
-                        // nowhere in this file to jump to.
-                        if let Some(kind) = kind
+                        // nowhere in this file to jump to and nothing to index.
+                        if let Some(id) = node
+                            && let Some(kind) = kind
                             && let Some(def) = definition_span(kind)
                         {
-                            defs.push((index.range_from_span(&span), index.range_from_span(&def)))
+                            modifiers |= declaration_modifiers(&span, &def, id, &statics);
+                            let range = index.range_from_span(&span);
+                            refs.push((range, id));
+                            decls
+                                .entry(id)
+                                .or_insert_with(|| Decl {
+                                    name_range: index.range_from_span(&def),
+                                    uses: Vec::new(),
+                                })
+                                .uses
+                                .push(range);
                         }
                         tokens.push((token_type, modifiers, span));
                     }
@@ -545,7 +753,11 @@ impl Backend {
             let mut pre_start = 0;
 
             tokens.sort_by_key(|(_, _, range)| range.start().byte_offset());
-            defs.sort_by_key(|(range, _)| range.start);
+            refs.sort_by_key(|(range, _)| range.start);
+            for decl in decls.values_mut() {
+                decl.uses.sort_by_key(|range| range.start);
+            }
+            let symbols = build_symbols(&unit, &index);
 
             guard.tokens = tokens
                 .into_iter()
@@ -570,7 +782,9 @@ impl Backend {
                 .collect();
 
             guard.patches = patches;
-            guard.defs = defs;
+            guard.refs = refs;
+            guard.decls = decls;
+            guard.symbols = symbols;
         }
         self.client
             .publish_diagnostics(uri, diags, Some(version))
@@ -657,6 +871,9 @@ impl LanguageServer for Backend {
                 ),
                 code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
+                document_symbol_provider: Some(OneOf::Left(true)),
+                references_provider: Some(OneOf::Left(true)),
+                document_highlight_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
         })
@@ -795,23 +1012,82 @@ impl LanguageServer for Backend {
         };
         let guard = document.lock().await;
         let pos = &params.text_document_position_params.position;
-        let end = guard.defs.partition_point(|(range, _)| &range.start <= pos);
-        if end == 0 {
+        let Some(decl) = guard.decl_at(pos) else {
             return Ok(None);
-        }
-        let def = &guard.defs[end - 1];
-        if &def.0.end <= pos {
-            Ok(None)
-        } else {
-            Ok(Some(GotoDefinitionResponse::Scalar(Location {
-                uri: params
-                    .text_document_position_params
-                    .text_document
-                    .uri
-                    .clone(),
-                range: def.1,
-            })))
-        }
+        };
+        Ok(Some(GotoDefinitionResponse::Scalar(Location {
+            uri: params
+                .text_document_position_params
+                .text_document
+                .uri
+                .clone(),
+            range: decl.name_range,
+        })))
+    }
+
+    async fn document_symbol(
+        &self,
+        params: DocumentSymbolParams,
+    ) -> Result<Option<DocumentSymbolResponse>> {
+        let Some(document) = self
+            .documents
+            .lock()
+            .await
+            .get(&params.text_document.uri)
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        let symbols = document.lock().await.symbols.clone();
+        Ok(Some(DocumentSymbolResponse::Nested(symbols)))
+    }
+
+    async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
+        let uri = &params.text_document_position.text_document.uri;
+        let Some(document) = self.documents.lock().await.get(uri).cloned() else {
+            return Ok(None);
+        };
+        let guard = document.lock().await;
+        let Some(decl) = guard.decl_at(&params.text_document_position.position) else {
+            return Ok(None);
+        };
+        let include_declaration = params.context.include_declaration;
+        Ok(Some(
+            decl.uses
+                .iter()
+                .filter(|range| include_declaration || **range != decl.name_range)
+                .map(|range| Location::new(uri.clone(), *range))
+                .collect(),
+        ))
+    }
+
+    async fn document_highlight(
+        &self,
+        params: DocumentHighlightParams,
+    ) -> Result<Option<Vec<DocumentHighlight>>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let Some(document) = self.documents.lock().await.get(uri).cloned() else {
+            return Ok(None);
+        };
+        let guard = document.lock().await;
+        let Some(decl) = guard.decl_at(&params.text_document_position_params.position) else {
+            return Ok(None);
+        };
+        Ok(Some(
+            decl.uses
+                .iter()
+                .map(|range| DocumentHighlight {
+                    range: *range,
+                    // The only write a single file can be sure of is the one
+                    // that introduced the name.
+                    kind: Some(if *range == decl.name_range {
+                        DocumentHighlightKind::WRITE
+                    } else {
+                        DocumentHighlightKind::TEXT
+                    }),
+                })
+                .collect(),
+        ))
     }
 }
 
@@ -970,6 +1246,69 @@ mod tests {
 
     fn parse_toml(input: &str) -> TomlValue {
         toml::from_str(input).unwrap()
+    }
+
+    /// Undo the delta encoding so a token can be named by where it starts.
+    fn absolute_tokens(data: &[SemanticToken]) -> Vec<((u32, u32), u32, u32)> {
+        let mut absolute = Vec::new();
+        let (mut line, mut start) = (0, 0);
+        for token in data {
+            if token.delta_line != 0 {
+                line += token.delta_line;
+                start = 0;
+            }
+            start += token.delta_start;
+            absolute.push((
+                (line, start),
+                token.token_type,
+                token.token_modifiers_bitset,
+            ));
+        }
+        absolute
+    }
+
+    fn token_at(absolute: &[((u32, u32), u32, u32)], line: u32, col: u32) -> (u32, u32) {
+        absolute
+            .iter()
+            .find(|((l, c), _, _)| (*l, *c) == (line, col))
+            .map(|(_, ty, modifiers)| (*ty, *modifiers))
+            .unwrap_or_else(|| panic!("no token at {line}:{col} in {absolute:?}"))
+    }
+
+    async fn semantic_tokens(harness: &mut Harness, uri: Uri) -> Vec<((u32, u32), u32, u32)> {
+        let tokens = harness
+            .send_request::<request::SemanticTokensFullRequest>(SemanticTokensParams {
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+                text_document: TextDocumentIdentifier { uri },
+            })
+            .await
+            .unwrap();
+        match tokens {
+            SemanticTokensResult::Tokens(tokens) => absolute_tokens(&tokens.data),
+            SemanticTokensResult::Partial(_) => panic!("unexpected partial tokens"),
+        }
+    }
+
+    /// A symbol reduced to what a test cares about: name, kind, and children.
+    type Outline = Vec<(String, SymbolKind, Vec<(String, SymbolKind)>)>;
+
+    fn outline(symbols: &[DocumentSymbol]) -> Outline {
+        symbols
+            .iter()
+            .map(|symbol| {
+                (
+                    symbol.name.clone(),
+                    symbol.kind,
+                    symbol
+                        .children
+                        .iter()
+                        .flatten()
+                        .map(|child| (child.name.clone(), child.kind))
+                        .collect(),
+                )
+            })
+            .collect()
     }
 
     #[test]
@@ -1279,38 +1618,218 @@ mod tests {
             SemanticTokensResult::Partial(_) => panic!("unexpected partial tokens"),
         };
 
-        // Undo the delta encoding so a token can be named by where it starts.
-        let mut absolute = Vec::new();
-        let (mut line, mut start) = (0, 0);
-        for token in &data {
-            if token.delta_line != 0 {
-                line += token.delta_line;
-                start = 0;
-            }
-            start += token.delta_start;
-            absolute.push((
-                (line, start),
-                token.token_type,
-                token.token_modifiers_bitset,
-            ));
-        }
-        let at = |line: u32, col: u32| -> (u32, u32) {
-            absolute
-                .iter()
-                .find(|((l, c), _, _)| (*l, *c) == (line, col))
-                .map(|(_, ty, modifiers)| (*ty, *modifiers))
-                .unwrap_or_else(|| panic!("no token at {line}:{col} in {absolute:?}"))
-        };
+        let absolute = absolute_tokens(&data);
+        let at = |line: u32, col: u32| token_at(&absolute, line, col);
 
         assert_eq!(at(0, 0), (TT_KEYWORD, 0));
-        // The declared name and its use both classify as a function.
-        assert_eq!(at(0, 4), (TT_FUNCTION, 0));
+        // The declared name and its use both classify as a function; only the
+        // declaration carries the declaration bits.
+        assert_eq!(at(0, 4), (TT_FUNCTION, MOD_DECLARATION | MOD_DEFINITION));
         assert_eq!(at(3, 7), (TT_FUNCTION, 0));
         // The parameter, at its declaration and in the body.
-        assert_eq!(at(0, 11), (TT_PARAMETER, 0));
+        assert_eq!(at(0, 11), (TT_PARAMETER, MOD_DECLARATION | MOD_DEFINITION));
         assert_eq!(at(1, 3), (TT_PARAMETER, 0));
         // `echo` is a prelude binding, which the client can style differently.
         assert_eq!(at(3, 0), (TT_FUNCTION, MOD_PRELUDE));
+    }
+
+    /// The outline follows the node table's parentage, not the source nesting.
+    ///
+    /// `if`, `for` and the rest are containment rather than names, so a `let`
+    /// written inside one is reported under the declaration that encloses it —
+    /// which is the level an outline pane can navigate to.
+    #[tokio::test(flavor = "current_thread")]
+    async fn document_symbol_nests_declarations_under_what_declares_them() {
+        let mut harness = Harness::new();
+        harness.initialize(vec![PositionEncodingKind::UTF16]).await;
+        let uri: Uri = "file:///document-symbol-test.dol".parse().unwrap();
+        let source = concat!(
+            "import std:\n",
+            "  - str\n",
+            "\n",
+            "def describe n\n",
+            "  if (n > 0)\n",
+            "    let sign = positive\n",
+            "    echo $sign\n",
+            "  str $n\n",
+            "\n",
+            "class Box\n",
+            "  pub field v = 0\n",
+            "\n",
+            "  pub def (init) self v\n",
+            "    self.v = v\n",
+            "\n",
+            "  pub def get self\n",
+            "    self.v\n",
+            "\n",
+            "let b = Box 1\n",
+        );
+        harness.open(uri.clone(), source, 1).await;
+
+        let response = harness
+            .send_request::<request::DocumentSymbolRequest>(DocumentSymbolParams {
+                text_document: TextDocumentIdentifier { uri },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            })
+            .await
+            .unwrap();
+        let symbols = match response {
+            DocumentSymbolResponse::Nested(symbols) => symbols,
+            DocumentSymbolResponse::Flat(_) => panic!("expected a nested symbol response"),
+        };
+
+        assert_eq!(
+            outline(&symbols),
+            vec![
+                ("str".to_owned(), SymbolKind::NAMESPACE, vec![]),
+                (
+                    "describe".to_owned(),
+                    SymbolKind::FUNCTION,
+                    // `sign` is written inside the `if`, which is not a symbol.
+                    vec![("sign".to_owned(), SymbolKind::VARIABLE)],
+                ),
+                (
+                    "Box".to_owned(),
+                    SymbolKind::CLASS,
+                    vec![
+                        ("v".to_owned(), SymbolKind::FIELD),
+                        ("init".to_owned(), SymbolKind::CONSTRUCTOR),
+                        ("get".to_owned(), SymbolKind::METHOD),
+                    ],
+                ),
+                ("b".to_owned(), SymbolKind::VARIABLE, vec![]),
+            ]
+        );
+
+        // The name a client selects must lie within the range it reveals.
+        let describe = &symbols[1];
+        assert!(describe.range.start <= describe.selection_range.start);
+        assert!(describe.selection_range.end <= describe.range.end);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn references_list_every_use_of_a_declaration() {
+        let mut harness = Harness::new();
+        harness.initialize(vec![PositionEncodingKind::UTF16]).await;
+        let uri: Uri = "file:///references-test.dol".parse().unwrap();
+        let source = concat!("def square n\n", "  (n * n)\n", "\n", "echo $ square 3\n");
+        harness.open(uri.clone(), source, 1).await;
+
+        let mut references_at = async |line: u32, col: u32, declaration: bool| -> Vec<Range> {
+            harness
+                .send_request::<request::References>(ReferenceParams {
+                    text_document_position: TextDocumentPositionParams {
+                        text_document: TextDocumentIdentifier { uri: uri.clone() },
+                        position: Position::new(line, col),
+                    },
+                    context: ReferenceContext {
+                        include_declaration: declaration,
+                    },
+                    work_done_progress_params: Default::default(),
+                    partial_result_params: Default::default(),
+                })
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|location| location.range)
+                .collect()
+        };
+
+        let uses = vec![
+            Range::new(Position::new(1, 3), Position::new(1, 4)),
+            Range::new(Position::new(1, 7), Position::new(1, 8)),
+        ];
+        let declaration = Range::new(Position::new(0, 11), Position::new(0, 12));
+
+        // From a use of the parameter, and from its declaration: both name the
+        // same node, so both answer with the same list.
+        assert_eq!(references_at(1, 3, false).await, uses);
+        assert_eq!(references_at(0, 11, false).await, uses);
+        assert_eq!(
+            references_at(1, 7, true).await,
+            vec![declaration, uses[0], uses[1]]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn document_highlight_marks_the_declaration_as_a_write() {
+        let mut harness = Harness::new();
+        harness.initialize(vec![PositionEncodingKind::UTF16]).await;
+        let uri: Uri = "file:///document-highlight-test.dol".parse().unwrap();
+        let source = concat!("def square n\n", "  (n * n)\n", "\n", "echo $ square 3\n");
+        harness.open(uri.clone(), source, 1).await;
+
+        let highlights = harness
+            .send_request::<request::DocumentHighlightRequest>(DocumentHighlightParams {
+                text_document_position_params: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri },
+                    position: Position::new(1, 3),
+                },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            highlights
+                .into_iter()
+                .map(|highlight| (highlight.range, highlight.kind))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    Range::new(Position::new(0, 11), Position::new(0, 12)),
+                    Some(DocumentHighlightKind::WRITE),
+                ),
+                (
+                    Range::new(Position::new(1, 3), Position::new(1, 4)),
+                    Some(DocumentHighlightKind::TEXT),
+                ),
+                (
+                    Range::new(Position::new(1, 7), Position::new(1, 8)),
+                    Some(DocumentHighlightKind::TEXT),
+                ),
+            ]
+        );
+    }
+
+    /// A field's scope decorator colors its declaration.
+    ///
+    /// The decorator resolves to the prelude `class`, which is the same test
+    /// the elaborator applies, so this cannot drift from the language.  Field
+    /// *access* is dynamic — `self.total` names no declaration the compiler
+    /// resolved — so only the declaring token carries anything.
+    #[tokio::test(flavor = "current_thread")]
+    async fn semantic_token_modifiers_mark_class_scoped_fields() {
+        let mut harness = Harness::new();
+        harness.initialize(vec![PositionEncodingKind::UTF16]).await;
+        let uri: Uri = "file:///token-modifier-test.dol".parse().unwrap();
+        let source = concat!(
+            "class Counter\n",
+            "  #[class]\n",
+            "  pub field total = 0\n",
+            "\n",
+            "  pub field n = 0\n",
+            "\n",
+            "  pub def bump self\n",
+            "    self.total = (self.total + 1)\n",
+            "    self.n = (self.n + 1)\n",
+        );
+        harness.open(uri.clone(), source, 1).await;
+
+        let absolute = semantic_tokens(&mut harness, uri).await;
+        let at = |line: u32, col: u32| token_at(&absolute, line, col);
+
+        assert_eq!(
+            at(2, 12),
+            (TT_PROPERTY, MOD_DECLARATION | MOD_DEFINITION | MOD_STATIC)
+        );
+        // The instance field beside it is a declaration but not class-scoped.
+        assert_eq!(at(4, 12), (TT_PROPERTY, MOD_DECLARATION | MOD_DEFINITION));
+        // Accessing either resolves to nothing, so neither claims a modifier.
+        assert_eq!(at(7, 9), (TT_PROPERTY, 0));
+        assert_eq!(at(8, 9), (TT_PROPERTY, 0));
     }
 
     #[tokio::test(flavor = "current_thread")]
