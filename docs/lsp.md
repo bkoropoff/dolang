@@ -6,9 +6,21 @@ enabling IDE features in any LSP-compatible editor.
 ## Supported Features
 
 - **Semantic tokens**: Syntax highlighting based on the compiler's
-  understanding of the code (not just regex patterns)
+  understanding of the code (not just regex patterns). Tokens are marked with
+  the `declaration`/`definition` modifiers where a name is introduced, the
+  `defaultLibrary` modifier for prelude bindings, and the `static` modifier for
+  a field a `#[class]` or `#[static]` decorator scopes to its class
 - **Diagnostics**: Compile-time errors and warnings reported in real time
 - **Go to definition**: Jump to the definition of variables and functions
+- **Document symbols**: The outline of a file -- classes, functions, methods,
+  fields, bindings and imports, nested under whatever declares them
+- **Find references and highlight**: Every use of the name under the cursor,
+  for the "find all references" command and for highlighting occurrences as
+  the cursor moves
+
+Both references and go-to-definition are limited to the current file, and
+resolve names the compiler resolves: a field access such as `self.count` is
+dynamic, so only the field's declaration is reported.
 
 ## Running the LSP
 
