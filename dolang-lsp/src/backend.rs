@@ -12,7 +12,7 @@ use tower_lsp_server::{
     Client, ClientSocket, LanguageServer, LspService, jsonrpc::Result, ls_types::*,
 };
 
-use dolang_compile::{Config as CompileConfig, Context, Origin, Token, diag};
+use dolang_compile::{Config as CompileConfig, Context, Kind, NodeId, Token, diag};
 
 const TOKEN_MODIFIERS: &[SemanticTokenModifier] = &[SemanticTokenModifier::DEFAULT_LIBRARY];
 const CONFIG_FILE_NAME: &str = ".dolang-lsp.toml";
@@ -47,7 +47,27 @@ const TT_CLASS: u32 = 11;
 
 const MOD_PRELUDE: u32 = 1;
 
-fn classify_token(token: Token, origin: Option<&Origin>, context: Context) -> (u32, u32) {
+/// Where a name a token refers to was declared, for go-to-definition.
+///
+/// Prelude bindings are declared by configuration rather than by source text,
+/// so they have no definition to jump to.
+fn definition_span(kind: Kind<'_>) -> Option<diag::Span> {
+    match kind {
+        Kind::Class { name, .. }
+        | Kind::Function { name, .. }
+        | Kind::Method { name, .. }
+        | Kind::SpecialMethod { name }
+        | Kind::Field { name, .. }
+        | Kind::Bind { name, .. }
+        | Kind::SelfParam { name }
+        | Kind::ImportModule { name, .. }
+        | Kind::ImportItem { name, .. } => Some(name),
+        Kind::Param { name, .. } => name,
+        _ => None,
+    }
+}
+
+fn classify_token(token: Token, kind: Option<&Kind<'_>>, context: Context) -> (u32, u32) {
     match token {
         Token::Comment => (TT_COMMENT, 0),
         Token::Constant => (TT_CONSTANT, 0),
@@ -66,18 +86,19 @@ fn classify_token(token: Token, origin: Option<&Origin>, context: Context) -> (u
         Token::Number => (TT_NUMBER, 0),
         Token::Operator => (TT_OPERATOR, 0),
         Token::StringDelim => (TT_STRING, 0),
-        Token::Variable => match (context, origin) {
-            (_, Some(Origin::Class { .. })) => (TT_CLASS, 0),
-            (Context::Call, Some(Origin::PreludeItem { .. })) => (TT_FUNCTION, MOD_PRELUDE),
-            (Context::Call, Some(Origin::PreludeModule { .. })) => (TT_FUNCTION, MOD_PRELUDE),
+        Token::Variable => match (context, kind) {
+            (_, Some(Kind::Class { .. })) => (TT_CLASS, 0),
+            (Context::Call, Some(Kind::PreludeItem { .. })) => (TT_FUNCTION, MOD_PRELUDE),
+            (Context::Call, Some(Kind::PreludeModule { .. })) => (TT_FUNCTION, MOD_PRELUDE),
             (Context::Call, _) => (TT_FUNCTION, 0),
-            (Context::None, Some(Origin::Param { .. } | Origin::SelfParam { .. })) => {
-                (TT_PARAMETER, 0)
-            }
-            (Context::None, Some(Origin::Def { .. } | Origin::Method { .. })) => (TT_FUNCTION, 0),
-            (Context::None, Some(Origin::PreludeItem { .. })) => (TT_VARIABLE, MOD_PRELUDE),
-            (Context::None, Some(Origin::PreludeModule { .. })) => (TT_NAMESPACE, MOD_PRELUDE),
-            (Context::None, Some(Origin::ImportModule { .. })) => (TT_NAMESPACE, 0),
+            (Context::None, Some(Kind::Param { .. } | Kind::SelfParam { .. })) => (TT_PARAMETER, 0),
+            (
+                Context::None,
+                Some(Kind::Function { .. } | Kind::Method { .. } | Kind::SpecialMethod { .. }),
+            ) => (TT_FUNCTION, 0),
+            (Context::None, Some(Kind::PreludeItem { .. })) => (TT_VARIABLE, MOD_PRELUDE),
+            (Context::None, Some(Kind::PreludeModule { .. })) => (TT_NAMESPACE, MOD_PRELUDE),
+            (Context::None, Some(Kind::ImportModule { .. })) => (TT_NAMESPACE, 0),
             (Context::None, _) => (TT_VARIABLE, 0),
         },
         Token::Sigil => (TT_VARIABLE, 0),
@@ -502,25 +523,16 @@ impl Backend {
                 }
             }
             unit.tokens(
-                &mut |leaf, span: diag::Span, origin: Option<Origin>, context: Context| {
+                &mut |leaf, span: diag::Span, node: Option<NodeId>, context: Context| {
                     if span.start().byte_offset() != span.end().byte_offset()
                         && !matches!(leaf, Token::Delim)
                     {
-                        let (token_type, modifiers) =
-                            classify_token(leaf, origin.as_ref(), context);
-                        if let Some(origin) = origin
-                            && let Some(def) = match origin {
-                                Origin::ImportItem { name, .. } => Some(name),
-                                Origin::ImportModule { name, .. } => Some(name),
-                                Origin::PreludeModule { .. } => None,
-                                Origin::PreludeItem { .. } => None,
-                                Origin::Class { span } => Some(span),
-                                Origin::Def { span }
-                                | Origin::Bind { span }
-                                | Origin::Method { span, .. }
-                                | Origin::Field { span, .. } => Some(span),
-                                Origin::Param { span } | Origin::SelfParam { span } => Some(span),
-                            }
+                        let kind = node.and_then(|id| unit.node(id)).map(|node| node.kind());
+                        let (token_type, modifiers) = classify_token(leaf, kind.as_ref(), context);
+                        // Prelude bindings have no source text, so there is
+                        // nowhere in this file to jump to.
+                        if let Some(kind) = kind
+                            && let Some(def) = definition_span(kind)
                         {
                             defs.push((index.range_from_span(&span), index.range_from_span(&def)))
                         }
@@ -1166,6 +1178,139 @@ mod tests {
         assert_eq!(utf16_data.len(), 1);
         assert_eq!(utf8_data[0].length, 6);
         assert_eq!(utf16_data[0].length, 4);
+    }
+
+    /// Go-to-definition for the kinds of name a document node can describe.
+    ///
+    /// The old origin annotations distinguished these variants too, but only the
+    /// `let` case was covered; each arm here is a separate `Kind` the server
+    /// must map back to a declaration span.
+    #[tokio::test(flavor = "current_thread")]
+    async fn goto_definition_covers_every_kind_of_declaration() {
+        let mut harness = Harness::new();
+        harness.initialize(vec![PositionEncodingKind::UTF16]).await;
+        let uri: Uri = "file:///definition-kinds-test.dol".parse().unwrap();
+        let source = concat!(
+            "import std:\n",
+            "  - str\n",
+            "\n",
+            "def double n\n",
+            "  (n * 2)\n",
+            "\n",
+            "class Box\n",
+            "  pub field v = 0\n",
+            "\n",
+            "  pub def get self\n",
+            "    self.v\n",
+            "\n",
+            "echo $ str $ double 2\n",
+            "let b = Box\n",
+            "echo $b.get()\n",
+        );
+        harness.open(uri.clone(), source, 1).await;
+
+        let mut definition_at = async |line: u32, col: u32| -> Range {
+            let response = harness
+                .send_request::<request::GotoDefinition>(GotoDefinitionParams {
+                    text_document_position_params: TextDocumentPositionParams {
+                        text_document: TextDocumentIdentifier { uri: uri.clone() },
+                        position: Position::new(line, col),
+                    },
+                    work_done_progress_params: Default::default(),
+                    partial_result_params: Default::default(),
+                })
+                .await
+                .unwrap();
+            match response {
+                GotoDefinitionResponse::Scalar(location) => location.range,
+                other => panic!("unexpected definition response shape: {other:?}"),
+            }
+        };
+
+        // A parameter, from its use in the body.
+        assert_eq!(
+            definition_at(4, 3).await,
+            Range::new(Position::new(3, 11), Position::new(3, 12))
+        );
+        // A function, from a call.
+        assert_eq!(
+            definition_at(12, 14).await,
+            Range::new(Position::new(3, 4), Position::new(3, 10))
+        );
+        // An imported item, from a call.
+        assert_eq!(
+            definition_at(12, 8).await,
+            Range::new(Position::new(1, 4), Position::new(1, 7))
+        );
+        // A class, from the name that constructs it.
+        assert_eq!(
+            definition_at(13, 9).await,
+            Range::new(Position::new(6, 6), Position::new(6, 9))
+        );
+        // `self`, from its use in a method body.
+        assert_eq!(
+            definition_at(10, 5).await,
+            Range::new(Position::new(9, 14), Position::new(9, 18))
+        );
+    }
+
+    /// Semantic tokens carry the type and modifiers a client colors by.
+    ///
+    /// The token type for a name depends on the declaration it refers to, so
+    /// this is what proves the node stream reaches the client.
+    #[tokio::test(flavor = "current_thread")]
+    async fn semantic_tokens_classify_names_by_what_they_refer_to() {
+        let mut harness = Harness::new();
+        harness.initialize(vec![PositionEncodingKind::UTF16]).await;
+        let uri: Uri = "file:///semantic-token-kind-test.dol".parse().unwrap();
+        let source = concat!("def double n\n", "  (n * 2)\n", "\n", "echo $ double 2\n");
+        harness.open(uri.clone(), source, 1).await;
+
+        let tokens = harness
+            .send_request::<request::SemanticTokensFullRequest>(SemanticTokensParams {
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+                text_document: TextDocumentIdentifier { uri },
+            })
+            .await
+            .unwrap();
+        let data = match tokens {
+            SemanticTokensResult::Tokens(tokens) => tokens.data,
+            SemanticTokensResult::Partial(_) => panic!("unexpected partial tokens"),
+        };
+
+        // Undo the delta encoding so a token can be named by where it starts.
+        let mut absolute = Vec::new();
+        let (mut line, mut start) = (0, 0);
+        for token in &data {
+            if token.delta_line != 0 {
+                line += token.delta_line;
+                start = 0;
+            }
+            start += token.delta_start;
+            absolute.push((
+                (line, start),
+                token.token_type,
+                token.token_modifiers_bitset,
+            ));
+        }
+        let at = |line: u32, col: u32| -> (u32, u32) {
+            absolute
+                .iter()
+                .find(|((l, c), _, _)| (*l, *c) == (line, col))
+                .map(|(_, ty, modifiers)| (*ty, *modifiers))
+                .unwrap_or_else(|| panic!("no token at {line}:{col} in {absolute:?}"))
+        };
+
+        assert_eq!(at(0, 0), (TT_KEYWORD, 0));
+        // The declared name and its use both classify as a function.
+        assert_eq!(at(0, 4), (TT_FUNCTION, 0));
+        assert_eq!(at(3, 7), (TT_FUNCTION, 0));
+        // The parameter, at its declaration and in the body.
+        assert_eq!(at(0, 11), (TT_PARAMETER, 0));
+        assert_eq!(at(1, 3), (TT_PARAMETER, 0));
+        // `echo` is a prelude binding, which the client can style differently.
+        assert_eq!(at(3, 0), (TT_FUNCTION, MOD_PRELUDE));
     }
 
     #[tokio::test(flavor = "current_thread")]

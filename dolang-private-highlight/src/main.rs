@@ -5,7 +5,7 @@ use std::{
 };
 
 use clap::Parser;
-use dolang::compile::{Config, Context, Origin, Pos, Severity, Span, Token};
+use dolang::compile::{Config, Context, Kind, NodeId, Pos, Severity, Span, Token};
 
 use serde_json::{Value, json};
 
@@ -59,19 +59,39 @@ fn severity_kind(severity: &Severity) -> &'static str {
     }
 }
 
-fn origin_kind(origin: &Origin) -> &'static str {
-    match origin {
-        Origin::ImportItem { .. } => "import_item",
-        Origin::ImportModule { .. } => "import_module",
-        Origin::PreludeModule { .. } => "prelude_module",
-        Origin::PreludeItem { .. } => "prelude_item",
-        Origin::Class { .. } => "class",
-        Origin::Def { .. } => "def",
-        Origin::Bind { .. } => "bind",
-        Origin::Method { .. } => "method",
-        Origin::Field { .. } => "field",
-        Origin::Param { .. } => "param",
-        Origin::SelfParam { .. } => "self_param",
+/// Name the kind of declaration a token refers to.
+///
+/// This vocabulary is its own, not the token vocabulary: it answers what a name
+/// *is*, where `kind` answers what a span of text looks like.
+fn node_kind(kind: &Kind<'_>) -> &'static str {
+    match kind {
+        Kind::ImportItem { .. } => "import_item",
+        Kind::ImportModule { .. } => "import_module",
+        Kind::PreludeModule { .. } => "prelude_module",
+        Kind::PreludeItem { .. } => "prelude_item",
+        Kind::Class { .. } => "class",
+        Kind::Function { .. } => "function",
+        Kind::Bind { .. } => "bind",
+        Kind::Method { .. } => "method",
+        Kind::SpecialMethod { .. } => "special_method",
+        Kind::Field { .. } => "field",
+        Kind::Param { .. } => "param",
+        Kind::SelfParam { .. } => "self_param",
+        Kind::Lambda => "lambda",
+        Kind::If => "if",
+        Kind::Else => "else",
+        Kind::While => "while",
+        Kind::For => "for",
+        Kind::Try => "try",
+        Kind::Catch => "catch",
+        Kind::Finally => "finally",
+        Kind::ForElem => "for_elem",
+        Kind::IfElem => "if_elem",
+        Kind::Decorator { .. } => "decorator",
+        Kind::Break { .. } => "break",
+        Kind::Continue { .. } => "continue",
+        Kind::Return { .. } => "return",
+        _ => "unknown",
     }
 }
 
@@ -93,15 +113,15 @@ fn main() -> io::Result<()> {
     };
     let unit = Config::new().recover(true).unit(path, &content);
     let mut tokens = vec![];
-    unit.tokens(&mut |token, span, origin, context| {
+    unit.tokens(&mut |token, span, node: Option<NodeId>, context| {
         let mut obj = json!({
             "kind": token_kind(&token),
             "span": span_repr(&span),
         });
-        if let Some(origin) = origin {
+        if let Some(kind) = node.and_then(|id| unit.node(id)).map(|node| node.kind()) {
             obj.as_object_mut()
                 .unwrap()
-                .insert("origin".into(), origin_kind(&origin).into());
+                .insert("node".into(), node_kind(&kind).into());
         }
         if let Some(context) = context_kind(&context) {
             obj.as_object_mut()

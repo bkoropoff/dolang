@@ -3,7 +3,7 @@ use std::{
     collections::HashSet,
 };
 
-use super::{ast::Var, constant, origin, sig, source::Span, sym};
+use super::{ast::Var, constant, doc, sig, source::Span, sym};
 use dolang_util::arena::ArenaVec;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -176,14 +176,14 @@ impl Graph {
         func: FuncId,
         parent: Option<ScopeId>,
         vars: &[Var],
-        origintab: &origin::Table,
+        doctab: &doc::Table,
     ) -> ScopeId {
         let id = ScopeId(self.scopes.len());
         let mut borrow = self.func_mut(func);
         let caps: usize = vars.iter().map(|l| l.captured as usize).sum();
         let locals = vars
             .iter()
-            .map(|v| v.is_emitted(origintab) as usize)
+            .map(|v| v.is_emitted(doctab) as usize)
             .sum::<usize>()
             - caps;
         let local_offset = if is_func {
@@ -195,7 +195,7 @@ impl Graph {
                 parent
                     .vars
                     .iter()
-                    .map(|v| v.is_emitted(origintab) as usize)
+                    .map(|v| v.is_emitted(doctab) as usize)
                     .sum::<usize>()
                     - parent.caps,
             );
@@ -254,11 +254,11 @@ impl Graph {
         &self,
         sig: sig::UnpackId,
         scope: Option<ScopeId>,
-        origintab: &origin::Table,
+        doctab: &doc::Table,
     ) -> FuncId {
         let id = FuncId(self.funcs.len());
         self.funcs.push(RefCell::new(Func::new(sig, None)));
-        let sid = self.alloc_scope(true, true, id, scope, &[], origintab);
+        let sid = self.alloc_scope(true, true, id, scope, &[], doctab);
         let enter = self.alloc_block(id, sid);
         let exit = self.alloc_block(id, sid);
         let mut func = self.funcs[id.index()].borrow_mut();
@@ -273,11 +273,11 @@ impl Graph {
         name: Option<Span>,
         vars: &[Var],
         scope: Option<ScopeId>,
-        origintab: &origin::Table,
+        doctab: &doc::Table,
     ) -> FuncId {
         let id = FuncId(self.funcs.len());
         self.funcs.push(RefCell::new(Func::new(sig, name)));
-        let sid = self.alloc_scope(true, false, id, scope, vars, origintab);
+        let sid = self.alloc_scope(true, false, id, scope, vars, doctab);
         let enter = self.alloc_block(id, sid);
         let exit = self.alloc_block(id, sid);
         let mut func = self.funcs[id.index()].borrow_mut();

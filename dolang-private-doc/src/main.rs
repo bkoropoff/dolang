@@ -1,13 +1,14 @@
 #![deny(warnings)]
 
 use std::{
+    collections::HashMap,
     fs,
     io::{self, Read},
     path::{Path, PathBuf},
 };
 
 use clap::Parser;
-use dolang::compile::{Config, Context, Origin, Token};
+use dolang::compile::{Config, Kind, Node, NodeId, ParamForm, Span, Unit};
 use serde_json::{Value, json};
 
 #[derive(Parser)]
@@ -22,62 +23,27 @@ struct Cli {
     path: Option<PathBuf>,
 }
 
-/// A collected token with its span information
-struct TokEntry {
-    token: Token,
-    /// byte offset of start
-    start: usize,
-    /// 0-based line of start
-    line: u32,
-    /// 0-based column of start
-    col: u32,
-    /// byte offset of end
-    end: usize,
-    origin: Option<Origin>,
-}
-
-fn collect_tokens(path: &Path, content: &[u8]) -> Vec<TokEntry> {
-    let unit = Config::new().recover(true).unit(path, content);
-    let mut entries: Vec<TokEntry> = Vec::new();
-    unit.tokens(
-        &mut |token, span: dolang::compile::Span, origin, _ctx: Context| {
-            entries.push(TokEntry {
-                token,
-                start: span.start().byte_offset(),
-                line: span.start().line_offset(),
-                col: span.start().column_offset(),
-                end: span.end().byte_offset(),
-                origin,
-            });
-        },
-    );
-    // Sort by start offset; tokens are not guaranteed to be in source order
-    entries.sort_by_key(|e| e.start);
-    entries
-}
-
 /// Extract the text slice from source bytes for a given byte range
 fn src_text(content: &[u8], start: usize, end: usize) -> &str {
     std::str::from_utf8(&content[start..end]).unwrap_or("")
 }
 
-/// Determine if a token is a definition site (token span matches origin def span)
-fn is_def_site(entry: &TokEntry) -> bool {
-    match &entry.origin {
-        Some(Origin::Class { span }) => span.start().byte_offset() == entry.start,
-        Some(Origin::Def { span })
-        | Some(Origin::Bind { span })
-        | Some(Origin::Method { span, .. })
-        | Some(Origin::Field { span, .. }) => span.start().byte_offset() == entry.start,
-        Some(Origin::Param { span }) => span.start().byte_offset() == entry.start,
-        Some(Origin::SelfParam { span }) => span.start().byte_offset() == entry.start,
-        _ => false,
-    }
+fn span_text(content: &[u8], span: &Span) -> String {
+    src_text(
+        content,
+        span.start().byte_offset(),
+        span.end().byte_offset(),
+    )
+    .to_owned()
 }
 
 /// Scans backward for the preceding block of doc comments, skipping decorators.
-fn extract_doc(entry: &TokEntry, content: &[u8]) -> String {
-    let prefix = std::str::from_utf8(&content[..entry.start]).unwrap_or("");
+///
+/// Doc comments are the one thing the compiler does not model: they are just
+/// comments, attached by adjacency rather than by syntax, so they are recovered
+/// from the source text.
+fn extract_doc(content: &[u8], offset: usize) -> String {
+    let prefix = std::str::from_utf8(&content[..offset]).unwrap_or("");
     let prefix = prefix.rsplit_once('\n').map_or("", |(lines, _)| lines);
     let mut comment_lines: Vec<String> = Vec::new();
     let mut lines = prefix.lines().rev().peekable();
@@ -103,188 +69,114 @@ fn extract_doc(entry: &TokEntry, content: &[u8]) -> String {
     comment_lines.join("\n")
 }
 
-fn has_decorator(entry: &TokEntry, content: &[u8], decorator: &str) -> bool {
-    let prefix = std::str::from_utf8(&content[..entry.start]).unwrap_or("");
-    let prefix = prefix.rsplit_once('\n').map_or("", |(lines, _)| lines);
-    prefix
-        .lines()
-        .rev()
-        .take_while(|line| line.trim_start().starts_with("#["))
-        .any(|line| line.trim() == format!("#[{decorator}]"))
+/// The prelude bindings whose presence as a decorator means something here.
+///
+/// Field scope and `#[getter]` are both decided by which prelude item a
+/// decorator resolves to — the same test the elaborator applies — so resolving
+/// these once lets every later check be an identity comparison rather than a
+/// match on source text.
+#[derive(Default)]
+struct Decorators {
+    getter: Option<NodeId>,
+    class: Option<NodeId>,
+    r#static: Option<NodeId>,
 }
 
-/// Determine if a token is a special method definition (e.g. `(init)`).
-/// Special methods are emitted as `Token::Keyword`; the `(` precedes the span start.
-fn is_special_method(entry: &TokEntry, content: &[u8]) -> bool {
-    matches!(entry.token, Token::Method) && entry.start > 0 && content[entry.start - 1] == b'('
-}
-
-/// Determine if the entity at index `i` is `pub` by counting keyword tokens on the same line.
-/// Two keywords on the same line before the name → pub (e.g. `pub def` or `pub class`).
-fn is_pub(entries: &[TokEntry], i: usize) -> bool {
-    let def_line = entries[i].line;
-    let def_start = entries[i].start;
-    let mut keyword_count = 0;
-    // Scan backward on the same line
-    let mut j = i;
-    loop {
-        if j == 0 {
-            break;
+impl Decorators {
+    fn collect(unit: &Unit<'_>) -> Self {
+        let mut found = Self::default();
+        for (id, node) in unit.nodes() {
+            if let Kind::PreludeItem { module, item, .. } = node.kind()
+                && module == "std"
+            {
+                match item {
+                    "getter" => found.getter = Some(id),
+                    "class" => found.class = Some(id),
+                    "static" => found.r#static = Some(id),
+                    _ => {}
+                }
+            }
         }
-        j -= 1;
-        let e = &entries[j];
-        if e.line != def_line {
-            break;
-        }
-        if e.start >= def_start {
-            continue;
-        }
-        if matches!(e.token, Token::Keyword) {
-            keyword_count += 1;
-        }
+        found
     }
-    keyword_count >= 2
 }
 
-/// Collect parameters following a def name at index `i`.
-/// Returns `(name, optional)` pairs. Skips `self` and `SelfParam`.
-/// Stops on the first Keyword token (signals entry into the function body).
-/// A param is optional when the next non-param token before the following param
-/// (or end of params) is `Token::Delim` with text `=`.
-fn collect_params(entries: &[TokEntry], i: usize, content: &[u8]) -> Vec<(String, bool)> {
-    // First pass: collect indices of all param tokens
-    let mut param_indices: Vec<usize> = Vec::new();
-    for (j, e) in entries[(i + 1)..].iter().enumerate() {
-        if matches!(e.token, Token::Keyword) {
-            break;
-        }
-        if matches!(e.token, Token::Variable)
-            && is_def_site(e)
-            && matches!(
-                e.origin,
-                Some(Origin::Param { .. }) | Some(Origin::SelfParam { .. })
+/// A declaration, with the child nodes that describe it.
+struct Entity<'a> {
+    node: Node<'a>,
+    /// Nodes whose parent is this one, in source order
+    children: Vec<(NodeId, Node<'a>)>,
+}
+
+impl Entity<'_> {
+    fn decorates(&self, target: Option<NodeId>) -> bool {
+        target.is_some()
+            && self.children.iter().any(
+                |(_, child)| matches!(child.kind(), Kind::Decorator { target: t } if t == target),
             )
-        {
-            param_indices.push(j + i + 1);
-        }
     }
 
-    // Second pass: for each param, determine if it has a default (`=` before next param)
-    let mut params: Vec<(String, bool)> = Vec::new();
-    for (k, &pi) in param_indices.iter().enumerate() {
-        let e = &entries[pi];
-        // Skip self parameters
-        if matches!(e.origin, Some(Origin::SelfParam { .. })) {
-            continue;
-        }
-        // Detect keyword params by scanning back for Token::Key.
-        // For `:foo` style, Key and Variable overlap (Key is at pi-1 in sorted order).
-        // For `foo: local` style, Key is at pi-2 with a Delim `:` at pi-1.
-        // In both cases scan back over at most a Delim, then check for Key.
-        let key_name: Option<String> = 'key: {
-            let mut j = pi;
-            loop {
-                if j == 0 {
-                    break 'key None;
-                }
-                j -= 1;
-                match entries[j].token {
-                    Token::Key => {
-                        let kn = src_text(content, entries[j].start, entries[j].end);
-                        break 'key Some(format!(":{kn}"));
+    /// The parameters of a function or method, in the order declared.
+    ///
+    /// `self` is excluded: it is an artifact of how methods are called, not part
+    /// of the documented signature.
+    fn params(&self, content: &[u8]) -> Value {
+        Value::Array(
+            self.children
+                .iter()
+                .filter_map(|(_, child)| match child.kind() {
+                    Kind::Param {
+                        name,
+                        form,
+                        default,
+                    } => {
+                        let bound = name.map_or(String::new(), |name| span_text(content, &name));
+                        let name = match form {
+                            ParamForm::Key { key } => format!(":{}", span_text(content, &key)),
+                            ParamForm::Rest => format!("...{bound}"),
+                            _ => bound,
+                        };
+                        Some(json!({"name": name, "optional": default.is_some()}))
                     }
-                    Token::Delim => {} // skip the `:` separator
-                    _ => break 'key None,
-                }
-            }
-        };
-        // Detect rest params: Token::Sigil immediately before the param variable
-        let is_rest = key_name.is_none() && pi > 0 && matches!(entries[pi - 1].token, Token::Sigil);
-        let name = if let Some(kn) = key_name {
-            kn
-        } else if is_rest {
-            format!("...{}", src_text(content, e.start, e.end))
-        } else {
-            src_text(content, e.start, e.end).to_owned()
-        };
-
-        // Scan forward from pi+1 up to the next param index (or end) for `=`
-        let next_param_pos = param_indices.get(k + 1).copied().unwrap_or(entries.len());
-        let mut optional = false;
-        for te in entries[(pi + 1)..next_param_pos.min(entries.len())].iter() {
-            if matches!(te.token, Token::Keyword) {
-                break;
-            }
-            if matches!(te.token, Token::Delim) && src_text(content, te.start, te.end) == "=" {
-                optional = true;
-                break;
-            }
-        }
-        params.push((name, optional));
+                    _ => None,
+                })
+                .collect(),
+        )
     }
-    params
+
+    fn supers(&self, content: &[u8]) -> Value {
+        let Kind::Class { supers, .. } = self.node.kind() else {
+            return Value::Array(vec![]);
+        };
+        Value::Array(
+            supers
+                .map(|super_ref| json!(span_text(content, &super_ref.span)))
+                .collect(),
+        )
+    }
+
+    fn span_json(&self, name: &Span) -> Value {
+        json!({
+            "line": name.start().line_offset(),
+            "col": name.start().column_offset(),
+            "offset": name.start().byte_offset(),
+        })
+    }
 }
 
-/// Collect superclass references for a class definition at index `i`.
-/// Scans forward on the same line for Variable tokens after the class name.
-fn collect_supers(entries: &[TokEntry], i: usize, content: &[u8]) -> Vec<Value> {
-    let class_line = entries[i].line;
-    let class_end = entries[i].end;
-    let mut supers = Vec::new();
-    for e in entries[i + 1..].iter() {
-        if e.line != class_line {
-            break;
-        }
-        if e.start < class_end {
-            continue;
-        }
-        if matches!(e.token, Token::Variable) {
-            let name = src_text(content, e.start, e.end);
-            let super_ref = match &e.origin {
-                Some(Origin::ImportItem { module, item, .. }) => {
-                    let mod_name = src_text(
-                        content,
-                        module.start().byte_offset(),
-                        module.end().byte_offset(),
-                    );
-                    let item_name = src_text(
-                        content,
-                        item.start().byte_offset(),
-                        item.end().byte_offset(),
-                    );
-                    json!({ "module": mod_name, "item": item_name })
-                }
-                Some(Origin::ImportModule { module, .. }) => {
-                    let mod_name = src_text(
-                        content,
-                        module.start().byte_offset(),
-                        module.end().byte_offset(),
-                    );
-                    json!({ "module": mod_name })
-                }
-                _ => json!(name),
-            };
-            supers.push(super_ref);
+/// Group nodes by parent so each declaration can be described by its children.
+fn index_children<'a>(unit: &'a Unit<'a>) -> HashMap<NodeId, Vec<(NodeId, Node<'a>)>> {
+    let mut children: HashMap<NodeId, Vec<(NodeId, Node<'a>)>> = HashMap::new();
+    for (id, node) in unit.nodes() {
+        if let Some(parent) = node.parent() {
+            children.entry(parent).or_default().push((id, node));
         }
     }
-    supers
-}
-
-fn params_json(params: Vec<(String, bool)>) -> Value {
-    Value::Array(
-        params
-            .into_iter()
-            .map(|(name, optional)| json!({"name": name, "optional": optional}))
-            .collect(),
-    )
-}
-
-fn span_json(entry: &TokEntry) -> Value {
-    json!({
-        "line": entry.line,
-        "col": entry.col,
-        "offset": entry.start,
-    })
+    // Nothing depends on the order nodes are yielded, so impose source order.
+    for group in children.values_mut() {
+        group.sort_by_key(|(_, node)| node.span().start().byte_offset());
+    }
+    children
 }
 
 fn main() -> io::Result<()> {
@@ -297,145 +189,226 @@ fn main() -> io::Result<()> {
         (Path::new("<stdin>"), content)
     };
 
-    let entries = collect_tokens(path, &content);
+    println!("{}", document(path, &content, cli.module, cli.all));
+    Ok(())
+}
 
-    // Build a map from class name byte offset → list of member JSON objects,
-    // so we can group members under their class.
-    let mut class_members: std::collections::HashMap<usize, Vec<Value>> =
-        std::collections::HashMap::new();
-    // Track class info keyed by class ident byte offset
-    let mut class_info: std::collections::HashMap<usize, Value> = std::collections::HashMap::new();
-    // Top-level entities (non-class-members)
-    let mut top_level: Vec<(usize, Value)> = Vec::new();
+/// Describe every documented declaration in one source file.
+fn document(path: &Path, content: &[u8], module: Option<String>, all: bool) -> Value {
+    let unit = Config::new().recover(true).unit(path, content);
+    let decorators = Decorators::collect(&unit);
+    let children = index_children(&unit);
 
-    let n = entries.len();
-    for i in 0..n {
-        let e = &entries[i];
-        let special = is_special_method(e, &content);
-        if !(matches!(e.token, Token::Variable | Token::Method | Token::Field) || special)
-            || !is_def_site(e)
-        {
-            continue;
-        }
-        let pub_flag = is_pub(&entries, i);
-        if !pub_flag && !special && !cli.all {
-            continue;
-        }
-        // For special methods, extend the name to include surrounding parens: (init)
-        let name = if special {
-            let end = if e.end < content.len() && content[e.end] == b')' {
-                e.end + 1
-            } else {
-                e.end
-            };
-            src_text(&content, e.start - 1, end).to_owned()
-        } else {
-            src_text(&content, e.start, e.end).to_owned()
+    // Members are grouped under the class that is their parent.
+    let mut class_members: HashMap<NodeId, Vec<Value>> = HashMap::new();
+    // Top level entities, paired with their offset so they can be ordered by it.
+    // A class is held back until its members have been collected.
+    let mut top_level: Vec<(usize, Option<Value>, NodeId)> = Vec::new();
+
+    let mut nodes: Vec<_> = unit.nodes().collect();
+    nodes.sort_by_key(|(_, node)| node.span().start().byte_offset());
+
+    for (id, node) in nodes {
+        let entity = Entity {
+            node,
+            children: children.get(&id).cloned().unwrap_or_default(),
         };
-        let doc = extract_doc(e, &content);
-        let span = span_json(e);
 
-        match &e.origin {
-            Some(Origin::Class { .. }) => {
-                let supers = collect_supers(&entries, i, &content);
+        // A special method names itself after the protocol it implements
+        // rather than after any source text, and it belongs to the type's
+        // interface however it was declared — so it anchors at the whole
+        // declaration and counts as public.
+        let (kind, name, name_span, is_pub) = match node.kind() {
+            Kind::Class { name, is_pub, .. } => ("class", span_text(content, &name), name, is_pub),
+            Kind::Function { name, is_pub } => {
+                ("function", span_text(content, &name), name, is_pub)
+            }
+            Kind::Method { name, is_pub } => ("method", span_text(content, &name), name, is_pub),
+            // A special method's name is written in parentheses; the span
+            // covers the protocol name alone, so restore them for display.
+            Kind::SpecialMethod { name } => (
+                "method",
+                format!("({})", span_text(content, &name)),
+                name,
+                true,
+            ),
+            Kind::Field { name, is_pub } => ("field", span_text(content, &name), name, is_pub),
+            Kind::Bind { name, is_pub } => ("value", span_text(content, &name), name, is_pub),
+            _ => continue,
+        };
+        let special = matches!(node.kind(), Kind::SpecialMethod { .. });
+        if !is_pub && !all {
+            continue;
+        }
+
+        let offset = name_span.start().byte_offset();
+        let doc = extract_doc(content, node.span().start().byte_offset());
+        let span = entity.span_json(&name_span);
+
+        match kind {
+            "class" => {
                 let obj = json!({
                     "kind": "class",
                     "name": name,
-                    "pub": pub_flag,
+                    "pub": is_pub,
                     "span": span,
                     "doc": doc,
-                    "supers": supers,
+                    "supers": entity.supers(content),
                     "members": [],
                 });
-                class_info.insert(e.start, obj);
-                top_level.push((e.start, Value::Null)); // placeholder, filled later
+                top_level.push((offset, Some(obj), id));
             }
-            Some(Origin::Method { class: cls, .. }) => {
-                let member = if has_decorator(e, &content, "getter") {
+            "method" => {
+                // A `#[getter]` method presents as a field: it is read like one
+                // and documenting it as a method would be a lie about its use.
+                let member = if entity.decorates(decorators.getter) {
                     json!({
                         "kind": "field",
                         "name": name,
-                        "pub": pub_flag,
+                        "pub": is_pub,
                         "span": span,
                         "doc": doc,
                     })
                 } else {
-                    let params = params_json(collect_params(&entries, i, &content));
                     json!({
                         "kind": "method",
                         "name": name,
-                        "pub": pub_flag,
+                        "pub": is_pub,
                         "special": special,
                         "span": span,
                         "doc": doc,
-                        "params": params,
+                        "params": entity.params(content),
                     })
                 };
-                class_members
-                    .entry(cls.start().byte_offset())
-                    .or_default()
-                    .push(member);
+                if let Some(parent) = node.parent() {
+                    class_members.entry(parent).or_default().push(member);
+                }
             }
-            Some(Origin::Field { class: cls, .. }) => {
+            "field" => {
                 let member = json!({
                     "kind": "field",
                     "name": name,
-                    "pub": pub_flag,
+                    "pub": is_pub,
                     "span": span,
                     "doc": doc,
+                    "scope": field_scope(&entity, &decorators),
                 });
-                class_members
-                    .entry(cls.start().byte_offset())
-                    .or_default()
-                    .push(member);
+                if let Some(parent) = node.parent() {
+                    class_members.entry(parent).or_default().push(member);
+                }
             }
-            Some(Origin::Def { .. }) => {
-                let params = params_json(collect_params(&entries, i, &content));
+            "function" => {
                 let obj = json!({
                     "kind": "function",
                     "name": name,
-                    "pub": pub_flag,
+                    "pub": is_pub,
                     "span": span,
                     "doc": doc,
-                    "params": params,
+                    "params": entity.params(content),
                 });
-                top_level.push((e.start, obj));
+                top_level.push((offset, Some(obj), id));
             }
-            Some(Origin::Bind { .. }) => {
+            // Only a top-level binding is a module value; one nested inside a
+            // function is a local, and the parent link is what tells them apart.
+            "value" if node.parent().is_none() => {
                 let obj = json!({
                     "kind": "value",
                     "name": name,
-                    "pub": pub_flag,
+                    "pub": is_pub,
                     "span": span,
                     "doc": doc,
                 });
-                top_level.push((e.start, obj));
+                top_level.push((offset, Some(obj), id));
             }
             _ => {}
         }
     }
 
-    // Merge members into class objects and build final entity list
-    let mut entities: Vec<Value> = Vec::new();
-    for (offset, placeholder) in top_level {
-        if placeholder.is_null() {
-            // This is a class placeholder
-            if let Some(mut class_obj) = class_info.remove(&offset) {
-                let members = class_members.remove(&offset).unwrap_or_default();
-                *class_obj.get_mut("members").unwrap() = Value::Array(members);
-                entities.push(class_obj);
+    let entities: Vec<Value> = top_level
+        .into_iter()
+        .filter_map(|(_, obj, id)| {
+            let mut obj = obj?;
+            if obj["kind"] == "class" {
+                let members = class_members.remove(&id).unwrap_or_default();
+                *obj.get_mut("members").unwrap() = Value::Array(members);
             }
-        } else {
-            entities.push(placeholder);
-        }
+            Some(obj)
+        })
+        .collect();
+
+    json!({
+        "source": path.to_string_lossy(),
+        "module": module,
+        "entities": entities,
+    })
+}
+
+/// Which namespace a field belongs to.
+///
+/// The elaborator derives this from `#[class]` and `#[static]` decorators that
+/// have no runtime meaning; the decorators resolve to prelude items, so the same
+/// determination here is an identity comparison rather than a text match.
+fn field_scope(entity: &Entity<'_>, decorators: &Decorators) -> &'static str {
+    if entity.decorates(decorators.class) {
+        "class"
+    } else if entity.decorates(decorators.r#static) {
+        "static"
+    } else {
+        "instance"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FIXTURE: &str = "tests/fixture.dol";
+    const GOLDEN: &str = "tests/fixture.json";
+
+    fn describe(all: bool) -> Value {
+        let content = fs::read(FIXTURE).expect("fixture should be readable");
+        // Name the source by its bare file name so the golden does not record
+        // where the checkout happens to live.
+        document(
+            Path::new("fixture.dol"),
+            &content,
+            Some("fixture".to_owned()),
+            all,
+        )
     }
 
-    let output = json!({
-        "source": path.to_string_lossy(),
-        "module": cli.module,
-        "entities": entities,
-    });
+    /// The whole documented shape of a source file, held against a golden.
+    ///
+    /// The JSON is consumed by the mkdocstrings handler and its templates, so a
+    /// change here is a change to the rendered site; set `DOLANG_TEST_UPDATE=1`
+    /// to rewrite the golden once the new shape is what was intended.
+    #[test]
+    fn documents_a_source_file() {
+        let actual = format!(
+            "{}\n",
+            serde_json::to_string_pretty(&describe(false)).unwrap()
+        );
+        if std::env::var_os("DOLANG_TEST_UPDATE").is_some() {
+            fs::write(GOLDEN, &actual).expect("golden should be writable");
+            return;
+        }
+        let expected = fs::read_to_string(GOLDEN).expect("golden should be readable");
+        assert_eq!(actual, expected);
+    }
 
-    println!("{}", output);
-    Ok(())
+    /// Private declarations are documented only when asked for.
+    #[test]
+    fn private_declarations_appear_only_with_all() {
+        let names = |all| -> Vec<String> {
+            describe(all)["entities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entity| entity["name"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        assert!(!names(false).contains(&"internal".to_owned()));
+        assert!(names(true).contains(&"internal".to_owned()));
+        assert!(names(true).contains(&"secret".to_owned()));
+    }
 }

@@ -15,9 +15,9 @@ use crate::{
     },
     cfg::{self, BlockRefMut, Inst, InstInfo, Term, TermInfo},
     constant::{self, ConstantExt},
-    intern,
+    doc, intern,
     lex::Op,
-    origin, sig,
+    sig,
     source::{File, Span},
     sym,
 };
@@ -30,7 +30,7 @@ pub(crate) struct Lowerer<'c> {
     pub(crate) consttab: &'c mut constant::Table,
     pub(crate) packtab: &'c mut sig::PackTable,
     pub(crate) unpacktab: &'c mut sig::UnpackTable,
-    pub(crate) origintab: &'c origin::Table,
+    pub(crate) doctab: &'c doc::Table,
     pub(crate) prelude: &'c [PreludeImport],
     pub(crate) sentinel_const: Option<constant::Id>,
 }
@@ -93,7 +93,7 @@ struct Scope<'a, 'c, 'q> {
     consttab: &'c mut constant::Table,
     packtab: &'c mut sig::PackTable,
     unpacktab: &'c mut sig::UnpackTable,
-    origintab: &'c origin::Table,
+    doctab: &'c doc::Table,
     prelude: &'c [PreludeImport],
     sentinel_const: &'c mut Option<constant::Id>,
     graph: &'a cfg::Graph,
@@ -222,7 +222,7 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
             .vars
             .iter()
             .enumerate()
-            .filter(|(_, v)| v.is_emitted(self.origintab))
+            .filter(|(_, v)| v.is_emitted(self.doctab))
             .enumerate()
         {
             if index == j {
@@ -912,7 +912,7 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
                     self.block.func,
                     Some(self.block.scope),
                     &body.vars,
-                    self.origintab,
+                    self.doctab,
                 );
                 let bodyid = self.graph.alloc_block(self.block.func, bscope);
                 let (binds, unpack, bind_params) = match bind {
@@ -1018,7 +1018,7 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
                     self.block.func,
                     Some(self.block.scope),
                     &body.vars,
-                    self.origintab,
+                    self.doctab,
                 );
                 let bodyid = self.graph.alloc_block(self.block.func, bscope);
                 let (binds, unpack, bind_params) = match bind {
@@ -1126,7 +1126,7 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
                     self.block.func,
                     Some(self.block.scope),
                     &body.vars,
-                    self.origintab,
+                    self.doctab,
                 );
                 let bodyid = self.graph.alloc_block(self.block.func, bscope);
                 let (binds, unpack, bind_params) = match bind {
@@ -1386,7 +1386,7 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
                 self.block.func,
                 Some(self.block.scope),
                 &else_body.vars,
-                self.origintab,
+                self.doctab,
             );
             fallback = self.graph.alloc_block(self.block.func, fscope);
             self.queue(Work {
@@ -1418,7 +1418,7 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
                 self.block.func,
                 Some(self.block.scope),
                 &elif_branch.body.vars,
-                self.origintab,
+                self.doctab,
             );
             let tid = self.graph.alloc_block(self.block.func, tscope);
 
@@ -1458,7 +1458,7 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
             self.block.func,
             Some(self.block.scope),
             &node.tbranch.body.vars,
-            self.origintab,
+            self.doctab,
         );
         let tid = self.graph.alloc_block(self.block.func, tscope);
         let (bind, bind_params) = self.lower_cond(
@@ -1507,7 +1507,7 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
                 self.block.func,
                 Some(self.block.scope),
                 &else_block.vars,
-                self.origintab,
+                self.doctab,
             );
             fallback = self.graph.alloc_block(self.block.func, fscope);
             self.queue(Work {
@@ -1539,7 +1539,7 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
                 self.block.func,
                 Some(self.block.scope),
                 &elif_branch.body.vars,
-                self.origintab,
+                self.doctab,
             );
             let tid = self.graph.alloc_block(self.block.func, tscope);
 
@@ -1579,7 +1579,7 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
             self.block.func,
             Some(self.block.scope),
             &node.tbranch.body.vars,
-            self.origintab,
+            self.doctab,
         );
         let tid = self.graph.alloc_block(self.block.func, tscope);
         let (bind, bind_params) = self.lower_cond(
@@ -1623,7 +1623,7 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
             None,
             &func.body.vars,
             Some(self.block.scope),
-            self.origintab,
+            self.doctab,
         );
         let (enter, exit) = {
             let f = self.graph.func(fid);
@@ -1706,7 +1706,7 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
             self.block.func,
             Some(self.block.scope),
             &node.body.vars,
-            self.origintab,
+            self.doctab,
         );
         let bodyid = self.graph.alloc_block(self.block.func, bscope);
         let span = node.while_span;
@@ -1764,7 +1764,7 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
             self.block.func,
             Some(self.block.scope),
             &node.body.vars,
-            self.origintab,
+            self.doctab,
         );
         let bodyid = self.graph.alloc_block(self.block.func, bscope);
         let (binds, unpack, bind_params) = match &node.bind {
@@ -1968,7 +1968,7 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
             Some(name),
             &node.func.body.vars,
             Some(self.block.scope),
-            self.origintab,
+            self.doctab,
         );
         let (enter, exit) = {
             let func = self.graph.func(fid);
@@ -2046,7 +2046,7 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
             Some(name),
             &node.func.body.vars,
             Some(self.block.scope),
-            self.origintab,
+            self.doctab,
         );
         self.graph.func_mut(fid).class_name = Some(class_name);
         let (enter, exit) = {
@@ -2601,7 +2601,7 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
         let sig = self.unpacktab.id(&empty);
         let fid = self
             .graph
-            .alloc_nl_guard(sig, Some(self.block.scope), self.origintab);
+            .alloc_nl_guard(sig, Some(self.block.scope), self.doctab);
         let (enter, exit) = {
             let func = self.graph.func(fid);
             (func.enter, func.exit)
@@ -3224,7 +3224,7 @@ impl<'c> Lowerer<'c> {
         let mut graph = cfg::Graph::new();
         let empty = sig::Unpack::new(0, [], [], dolang_bytecode::Variadic::None);
         let sig = self.unpacktab.id(&empty);
-        let fid = graph.alloc_func(sig, None, &root.0.body.vars, None, self.origintab);
+        let fid = graph.alloc_func(sig, None, &root.0.body.vars, None, self.doctab);
         let (enter, exit) = {
             let func = graph.func(fid);
             (func.enter, func.exit)
@@ -3255,7 +3255,7 @@ impl<'c> Lowerer<'c> {
                 packtab: self.packtab,
                 unpacktab: self.unpacktab,
                 prelude: self.prelude,
-                origintab: self.origintab,
+                doctab: self.doctab,
                 sentinel_const: &mut self.sentinel_const,
                 graph: &graph,
                 bb: work.bb,

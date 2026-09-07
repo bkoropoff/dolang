@@ -22,4 +22,3 @@ features = ["derive"]
 [[bin]]
 name = "dolang-doc"
 path = "src/main.rs"
-test = false
