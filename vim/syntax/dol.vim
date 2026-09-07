@@ -29,9 +29,22 @@ syn region dolCompactExpr matchgroup=dolSpecial start="\zs\(\$\|\.\.\.\)\ze[^ \t
 syn region dolDecorator matchgroup=dolSpecial start="#\[" end="\]" contains=@dolExprList
 syn match dolComment "\(^\|\s\)\zs#\(\[\)\@!.*\ze$" contains=@Spell
 
+syn cluster dolFmtInterpList contains=dolFmtSpec,dolOperator,dolNumber,dolConstant,dolIdentifier,dolString,dolDelimiter,dolFullExpr,dolSymbol,dolEllipsis
+
 syn region dolStringInterp matchgroup=dolSpecial start="\$" end="\zs\ze[^A-Za-z0-9_]" contains=doIdentifier contained
 syn region dolStringInterp matchgroup=dolSpecial start="\$(" end=")" contains=@dolExprList contained
-syn region dolString matchgroup=dolQuote start=+"+ end=+"+ skip="\\\\\|\\\"" contains=dolStringInterp,@Spell
+" Formatted interpolation: ${value}, ${value:spec}, ${#name}, ${#name:spec}.
+" The value is a compact expression and may nest strings, parentheses and
+" further interpolations, so the closing brace has to be found by nesting
+" rather than by scanning for the first `}`.
+syn region dolStringInterp matchgroup=dolSpecial start="\${#\?" end="}" contains=@dolFmtInterpList contained
+" `$#0`/`$#name`: a parameter with no specification.
+syn match dolStringInterp "\$#\%(\d\+\|[A-Za-z_][A-Za-z0-9_]*\)" contained
+" The specification runs to the closing brace of the interpolation, but may
+" itself interpolate a width or precision.
+syn region dolFmtSpec matchgroup=dolColon start=":" end="}"me=s-1 contains=dolStringInterp contained
+
+syn region dolString matchgroup=dolQuote start=+"+ end=+"+ skip="\\\\\|\\\"" contains=dolEscape,dolStringInterp,@Spell
 
 syn match dolEscape +\\[nrt"\\\$]+ contained
 
@@ -59,6 +72,7 @@ hi def link dolString String
 hi def link dolQuote String
 hi def link dolSpecial Special
 hi def link dolEscape String
+hi def link dolFmtSpec Special
 hi def link dolNumber Number
 hi def link dolSymbol Constant
 hi def link dolDittoKey Normal
